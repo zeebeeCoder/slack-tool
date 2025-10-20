@@ -1,0 +1,43 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+.env.local
+
+# Configuration files (keep example, ignore actual)
+.slack-intel.yaml
+
+# IDE
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# uv
+.uv/
+
+# Cache
+.cache/
+*.cache
+.pytest_cache/
+.ruff_cache/
+cache/  # Parquet cache directory
+
+# Generated files
+llm_output_*.txt
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

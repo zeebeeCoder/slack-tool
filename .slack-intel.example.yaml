@@ -1,0 +1,17 @@
+# Slack Intelligence Configuration
+#
+# Copy this file to .slack-intel.yaml in your project directory or home directory
+# to configure default channels for caching.
+#
+# CLI arguments (--channel) will override these defaults.
+
+channels:
+  - name: general
+    id: C0123456789
+
+  - name: engineering
+    id: C9876543210
+
+  # Add more channels as needed:
+  # - name: your-channel-name
+  #   id: C0123456789
