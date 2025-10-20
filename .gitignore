@@ -32,11 +32,17 @@ wheels/
 *.cache
 .pytest_cache/
 .ruff_cache/
-cache/  # Parquet cache directory
+
+# Parquet cache directory - contains real Slack data
+cache/
 
 # Generated files
 llm_output_*.txt
 *.log
+
+# Sample/test output files (may contain real data)
+*-view.txt
+*-sample.txt
 
 # OS
 .DS_Store

@@ -586,6 +586,127 @@ class TestParquetCacheIntegration:
         print(f"  Total messages: {info['total_messages']}")
         print(f"  Total size: {info['total_size_bytes']:,} bytes")
 
+    async def test_user_cache_created_with_mentions(self):
+        """Test that user cache (users.parquet) is created with mentioned users"""
+        import re
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from datetime import datetime as dt
+
+        channels = load_test_channels()
+        if not channels:
+            pytest.skip("No .slack-intel.yaml config found")
+
+        manager = SlackChannelManager()
+        channel = channels[0]
+        time_window = TimeWindow(days=2, hours=0)  # Last 2 days
+
+        # Fetch messages
+        raw_messages = await manager.get_messages(
+            channel.id,
+            time_window.start_time,
+            time_window.end_time
+        )
+
+        if len(raw_messages) == 0:
+            pytest.skip("No messages in time window - skipping user cache test")
+
+        # Convert to SlackMessage objects
+        messages = convert_slack_dicts_to_messages(raw_messages)
+
+        # Extract user mentions (same logic as cache command)
+        all_mentioned_user_ids = set()
+        mention_pattern = r'<@(U[A-Z0-9]+)>'
+        for message in messages:
+            message_text = message.text if hasattr(message, 'text') else ""
+            if message_text:
+                mentions = re.findall(mention_pattern, message_text)
+                all_mentioned_user_ids.update(mentions)
+
+        # If no mentions found, skip
+        if not all_mentioned_user_ids:
+            pytest.skip("No user mentions found in messages - skipping user cache test")
+
+        print(f"\n✓ Found {len(all_mentioned_user_ids)} unique user mentions")
+
+        # Fetch user profiles (simulate cache command behavior)
+        import asyncio
+        semaphore = asyncio.Semaphore(10)
+
+        async def fetch_user_safe(user_id: str):
+            """Fetch user info with rate limiting"""
+            async with semaphore:
+                if user_id not in manager.user_cache:
+                    try:
+                        await manager.get_user_info(user_id)
+                    except Exception:
+                        pass  # Silently skip failures
+
+        await asyncio.gather(*[fetch_user_safe(uid) for uid in all_mentioned_user_ids])
+
+        # Save to users.parquet (simulate cache command)
+        # Note: cache command saves to parent of cache_dir (e.g., cache/users.parquet when cache_dir=cache/raw)
+        # For this test, cache_dir is just the temp dir, so we save directly to it
+        users_cache_path = Path(self.cache_dir) / "users.parquet"
+
+        if manager.user_cache:
+            cached_at = dt.now().isoformat()
+            users_list = []
+            for user_id, user_data in manager.user_cache.items():
+                users_list.append({
+                    'user_id': user_id,
+                    'user_name': user_data.get('name'),
+                    'user_real_name': user_data.get('real_name'),
+                    'user_email': user_data.get('profile', {}).get('email') if isinstance(user_data, dict) else None,
+                    'is_bot': user_data.get('is_bot', False) if isinstance(user_data, dict) else False,
+                    'cached_at': cached_at
+                })
+
+            # Save to Parquet
+            table = pa.Table.from_pylist(users_list)
+            pq.write_table(table, str(users_cache_path))
+
+            print(f"✓ Cached {len(users_list)} users to {users_cache_path}")
+
+            # Verify file exists
+            assert users_cache_path.exists(), "users.parquet file was not created"
+            assert users_cache_path.stat().st_size > 0, "users.parquet file is empty"
+
+            # Verify with DuckDB
+            conn = duckdb.connect()
+            result = conn.execute(f"""
+                SELECT
+                    COUNT(*) as total_users,
+                    COUNT(DISTINCT user_id) as unique_users,
+                    COUNT(DISTINCT user_real_name) as unique_names
+                FROM '{users_cache_path}'
+            """).fetchone()
+
+            total_users, unique_users, unique_names = result
+
+            assert total_users > 0, "No users in cache"
+            assert unique_users == total_users, "Duplicate user_ids found"
+
+            print(f"\n✓ User cache validation:")
+            print(f"  Total users: {total_users}")
+            print(f"  Unique IDs: {unique_users}")
+            print(f"  Unique names: {unique_names}")
+
+            # Verify schema
+            schema_result = conn.execute(f"""
+                DESCRIBE SELECT * FROM '{users_cache_path}'
+            """).fetchall()
+
+            schema_fields = [row[0] for row in schema_result]
+            required_fields = ['user_id', 'user_name', 'user_real_name', 'user_email', 'is_bot', 'cached_at']
+
+            for field in required_fields:
+                assert field in schema_fields, f"Missing required field: {field}"
+
+            print(f"✓ Schema has all {len(required_fields)} required fields")
+        else:
+            pytest.skip("No users were cached (may be API errors)")
+
 
 if __name__ == "__main__":
     # Allow running this file directly for quick testing

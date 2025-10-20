@@ -17,6 +17,7 @@ from .slack_channels import SlackChannelManager, SlackChannel, TimeWindow
 from .parquet_cache import ParquetCache
 from .utils import convert_slack_dicts_to_messages
 from .parquet_message_reader import ParquetMessageReader
+from .parquet_user_reader import ParquetUserReader
 from .thread_reconstructor import ThreadReconstructor
 from .message_view_formatter import MessageViewFormatter, ViewContext
 
@@ -128,6 +129,7 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enr
     # Results table and JIRA ticket collection
     results = []
     all_jira_ticket_ids = set()  # Collect unique JIRA tickets across all channels
+    all_mentioned_user_ids = set()  # Collect unique mentioned users across all channels
 
     # Process each channel
     for channel in channels:
@@ -168,22 +170,20 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enr
                 # Group messages by their actual date (from timestamp)
                 # This allows querying by message date, not cache date
                 from collections import defaultdict
-                from datetime import datetime as dt
 
                 messages_by_date = defaultdict(list)
                 for msg in messages:
-                    # Extract date from message timestamp
-                    if msg.timestamp:
-                        # Parse ISO timestamp and get date
-                        try:
-                            msg_dt = dt.fromisoformat(msg.timestamp.replace('Z', '+00:00'))
-                            msg_date = msg_dt.strftime('%Y-%m-%d')
+                    # Extract date from message timestamp (which is already a datetime object)
+                    try:
+                        if hasattr(msg, 'timestamp') and msg.timestamp:
+                            # msg.timestamp is a datetime object, format it directly
+                            msg_date = msg.timestamp.strftime('%Y-%m-%d')
                             messages_by_date[msg_date].append(msg)
-                        except (ValueError, AttributeError):
-                            # Fallback to partition_date if timestamp is invalid
+                        else:
+                            # No timestamp, use partition date
                             messages_by_date[date_str].append(msg)
-                    else:
-                        # No timestamp, use partition date
+                    except (ValueError, AttributeError, TypeError):
+                        # Fallback to partition_date if timestamp is invalid
                         messages_by_date[date_str].append(msg)
 
                 # Save messages partitioned by their actual date
@@ -201,21 +201,41 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enr
                         if jira_tickets:
                             all_jira_ticket_ids.update(jira_tickets)
 
+                # Extract user mentions from message text for user cache
+                import re
+                mention_pattern = r'<@(U[A-Z0-9]+)>'
+                for message in messages:
+                    message_text = message.text if hasattr(message, 'text') else ""
+                    if message_text:
+                        mentions = re.findall(mention_pattern, message_text)
+                        all_mentioned_user_ids.update(mentions)
+
                 # Calculate total size
                 file_size_mb = total_size / (1024 * 1024)
+
+                # Format partition info
+                if len(partition_paths) > 1:
+                    date_range = f"{min(messages_by_date.keys())} to {max(messages_by_date.keys())}"
+                    path_info = f"{len(partition_paths)} partitions: {date_range}"
+                elif len(partition_paths) == 1:
+                    path_info = partition_paths[0]
+                else:
+                    path_info = "-"
 
                 results.append({
                     "channel": channel.name,
                     "messages": len(messages),
                     "status": "cached",
-                    "path": f"{len(partition_paths)} partitions: {min(messages_by_date.keys())} to {max(messages_by_date.keys())}",
+                    "path": path_info,
                     "size_mb": file_size_mb
                 })
 
                 console.print(f"[green]  ✓ Cached {len(messages)} messages from {channel.name}[/green]")
 
             except Exception as e:
+                import traceback
                 console.print(f"[red]  ✗ Error processing {channel.name}: {e}[/red]")
+                console.print(f"[dim]{traceback.format_exc()}[/dim]")
                 results.append({
                     "channel": channel.name,
                     "messages": 0,
@@ -307,6 +327,113 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enr
     elif enrich_jira and not all_jira_ticket_ids:
         console.print()
         console.print("[yellow]No JIRA tickets found in messages[/yellow]")
+
+    # User Cache Enrichment Phase (always runs)
+    if all_mentioned_user_ids:
+        console.print()
+        console.print(Panel.fit(
+            f"[bold cyan]👥 User Cache Enrichment Phase[/bold cyan]\n"
+            f"Fetching profiles for {len(all_mentioned_user_ids)} unique mentioned users",
+            border_style="cyan"
+        ))
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task(
+                f"[cyan]Fetching {len(all_mentioned_user_ids)} user profiles...",
+                total=len(all_mentioned_user_ids)
+            )
+
+            try:
+                # Fetch user info in parallel using existing manager infrastructure
+                # The manager already has user_cache populated with message authors
+                # Now we'll fill in mentioned users who might not be authors
+
+                semaphore = asyncio.Semaphore(10)  # Limit concurrent requests
+
+                async def fetch_user_safe(user_id: str):
+                    """Fetch user info with rate limiting"""
+                    async with semaphore:
+                        if user_id not in manager.user_cache:
+                            try:
+                                await manager.get_user_info(user_id)
+                            except Exception as e:
+                                console.print(f"[dim]  Warning: Could not fetch user {user_id}: {e}[/dim]")
+
+                # Fetch all mentioned users
+                await asyncio.gather(*[fetch_user_safe(uid) for uid in all_mentioned_user_ids])
+                progress.update(task, completed=len(all_mentioned_user_ids))
+
+                # Save user cache to global Parquet file
+                if manager.user_cache:
+                    from datetime import datetime as dt
+                    import pyarrow as pa
+                    import pyarrow.parquet as pq
+
+                    # Save to parent of cache_path (e.g., cache/users.parquet when cache_path=cache/raw)
+                    users_cache_path = Path(cache_path).parent / "users.parquet"
+
+                    # Load existing users if file exists
+                    existing_users = {}
+                    if users_cache_path.exists():
+                        try:
+                            existing_table = pq.read_table(str(users_cache_path))
+                            existing_df = existing_table.to_pydict()
+                            for i in range(len(existing_df['user_id'])):
+                                user_id = existing_df['user_id'][i]
+                                existing_users[user_id] = {
+                                    'user_id': user_id,
+                                    'user_name': existing_df['user_name'][i],
+                                    'user_real_name': existing_df['user_real_name'][i],
+                                    'user_email': existing_df.get('user_email', [None] * len(existing_df['user_id']))[i],
+                                    'is_bot': existing_df.get('is_bot', [False] * len(existing_df['user_id']))[i],
+                                    'cached_at': existing_df.get('cached_at', [None] * len(existing_df['user_id']))[i]
+                                }
+                        except Exception as e:
+                            console.print(f"[yellow]  ⚠ Could not load existing user cache: {e}[/yellow]")
+
+                    # Merge with new users (upsert)
+                    cached_at = dt.now().isoformat()
+                    for user_id, user_data in manager.user_cache.items():
+                        existing_users[user_id] = {
+                            'user_id': user_id,
+                            'user_name': user_data.get('name'),
+                            'user_real_name': user_data.get('real_name'),
+                            'user_email': user_data.get('profile', {}).get('email') if isinstance(user_data, dict) else None,
+                            'is_bot': user_data.get('is_bot', False) if isinstance(user_data, dict) else False,
+                            'cached_at': cached_at
+                        }
+
+                    # Convert to PyArrow table
+                    users_list = list(existing_users.values())
+                    table = pa.Table.from_pylist(users_list)
+
+                    # Save to Parquet
+                    users_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    pq.write_table(table, str(users_cache_path))
+
+                    file_size = users_cache_path.stat().st_size / (1024 * 1024)
+                    console.print(
+                        f"[green]  ✓ Cached {len(existing_users)} users "
+                        f"({file_size:.2f} MB)[/green]"
+                    )
+                    console.print(f"[dim]  Path: {users_cache_path}[/dim]")
+                else:
+                    console.print("[yellow]  ⚠ No users to cache[/yellow]")
+
+            except Exception as e:
+                console.print(f"[red]  ✗ User cache enrichment failed: {e}[/red]")
+                import traceback
+                console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+    elif all_mentioned_user_ids:
+        console.print()
+        console.print("[dim]No mentioned users found in messages[/dim]")
 
 
 @cli.command()
@@ -509,8 +636,17 @@ def view(channel, date, start_date, end_date, cache_path, output):
         slack-intel view -c general --date 2025-10-20 -o output.txt
     """
     try:
-        # Initialize reader
+        # Initialize readers
         reader = ParquetMessageReader(base_path=cache_path)
+        user_reader = ParquetUserReader(base_path=cache_path)
+
+        # Load cached users for mention resolution
+        console.print("[dim]Loading user cache...[/dim]")
+        cached_users = user_reader.read_users()
+        if cached_users:
+            console.print(f"[dim]Loaded {len(cached_users)} users from cache[/dim]")
+        else:
+            console.print("[dim]No user cache found (mentions may not be resolved)[/dim]")
 
         # Handle channel naming: try exact name first, then with "channel_" prefix
         # This handles both config-based channels (named) and CLI channel IDs
@@ -568,7 +704,7 @@ def view(channel, date, start_date, end_date, cache_path, output):
             date_range=date_range_str
         )
         formatter = MessageViewFormatter()
-        view_output = formatter.format(structured_messages, context)
+        view_output = formatter.format(structured_messages, context, cached_users=cached_users)
 
         # Output
         if output:
