@@ -1,0 +1,25 @@
+#!/bin/bash
+# Pre-commit hook to run unit tests before committing
+
+echo "🧪 Running unit tests before commit..."
+echo ""
+
+# Run unit tests (exclude integration tests)
+uv run pytest tests/ -v -m "not integration" --tb=short -q
+
+# Capture exit code
+TEST_EXIT_CODE=$?
+
+echo ""
+
+if [ $TEST_EXIT_CODE -eq 0 ]; then
+    echo "✅ All unit tests passed! Proceeding with commit."
+    exit 0
+else
+    echo "❌ Unit tests failed! Commit blocked."
+    echo ""
+    echo "Fix the failing tests and try again, or use:"
+    echo "  git commit --no-verify"
+    echo "to skip this hook (not recommended)."
+    exit 1
+fi

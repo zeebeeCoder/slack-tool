@@ -144,6 +144,11 @@ Install with dev dependencies:
 uv sync --all-extras
 ```
 
+Install git hooks (recommended):
+```bash
+./hooks/install.sh
+```
+
 Run tests:
 ```bash
 uv run pytest
@@ -153,6 +158,10 @@ Format code:
 ```bash
 uv run ruff check --fix
 ```
+
+### Git Hooks
+
+The project includes a pre-commit hook that runs unit tests before each commit. This ensures code quality and catches issues early. See [hooks/README.md](hooks/README.md) for details.
 
 ## Testing
 
