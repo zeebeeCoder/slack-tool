@@ -184,7 +184,14 @@ class SlackMessage(BaseModel):
     @property
     def is_thread_parent(self) -> bool:
         """Check if this message is the start of a thread"""
-        return self.thread is not None
+        # Check if thread object is attached (when thread is fully built)
+        if self.thread is not None:
+            return True
+        # Otherwise compute from fields (when caching from API)
+        return (
+            self.thread_ts == self.ts and
+            self.replies_count > 0
+        )
 
     @property
     def is_thread_reply(self) -> bool:
@@ -548,7 +555,94 @@ class SlackChannelManager:
                 if user_id:
                     message["user_info"] = self.user_cache.get(user_id)
 
-            self.logger.debug(f"Retrieved {len(messages)} messages")
+            # Fetch thread replies for thread parents
+            # Thread parent detection: thread_ts == ts AND reply_count > 0
+            thread_parents = [
+                msg for msg in messages
+                if msg.get("thread_ts") == msg.get("ts") and msg.get("reply_count", 0) > 0
+            ]
+            thread_replies = []  # Initialize for logging
+
+            if thread_parents:
+                self.logger.info(
+                    f"Found {len(thread_parents)} thread parents, fetching replies..."
+                )
+
+                async def fetch_thread_replies(thread_ts: str) -> List[Dict[str, Any]]:
+                    """Fetch all replies for a thread"""
+                    async with semaphore:
+                        try:
+                            replies_result = await self.client.conversations_replies(
+                                channel=channel_id, ts=thread_ts
+                            )
+                            thread_messages = (
+                                replies_result.data.get("messages", [])
+                                if hasattr(replies_result, "data")
+                                and isinstance(replies_result.data, dict)
+                                else []
+                            )
+                            # Skip first message (parent) and return only replies
+                            return thread_messages[1:] if len(thread_messages) > 1 else []
+                        except SlackApiError as e:
+                            self.logger.warning(
+                                f"Error fetching thread replies for {thread_ts}: {e}"
+                            )
+                            return []
+
+                # Fetch all thread replies in parallel
+                thread_tasks = [
+                    fetch_thread_replies(parent["ts"]) for parent in thread_parents
+                ]
+                all_thread_replies_lists = await asyncio.gather(
+                    *thread_tasks, return_exceptions=True
+                )
+
+                # Flatten and collect all thread replies
+                for replies_list in all_thread_replies_lists:
+                    if isinstance(replies_list, list):
+                        thread_replies.extend(replies_list)
+
+                if thread_replies:
+                    # Fetch user info for reply authors not yet in cache
+                    reply_user_tasks = []
+                    for reply in thread_replies:
+                        user_id = reply.get("user")
+                        if user_id and user_id not in self.user_cache:
+                            reply_user_tasks.append(fetch_user_info(user_id))
+
+                    if reply_user_tasks:
+                        reply_user_responses = await asyncio.gather(
+                            *reply_user_tasks, return_exceptions=True
+                        )
+                        for response in reply_user_responses:
+                            if isinstance(response, SlackApiError):
+                                self.logger.error(
+                                    f"Error fetching reply user info: {response}"
+                                )
+                                continue
+                            if (
+                                not isinstance(response, Exception)
+                                and hasattr(response, "data")
+                                and isinstance(response.data, dict)
+                            ):
+                                user = response.data.get("user")
+                                if user:
+                                    self.user_cache[user.get("id")] = user
+
+                    # Add user info to thread replies
+                    for reply in thread_replies:
+                        user_id = reply.get("user")
+                        if user_id:
+                            reply["user_info"] = self.user_cache.get(user_id)
+
+                    # Add thread replies to messages list
+                    messages.extend(thread_replies)
+
+            self.logger.debug(
+                f"Retrieved {len(messages)} total messages "
+                f"({len(messages) - len(thread_replies) if thread_parents else len(messages)} timeline, "
+                f"{len(thread_replies) if thread_parents else 0} thread replies)"
+            )
             return messages
 
         except SlackApiError as e:
@@ -1097,6 +1191,7 @@ class SlackChannelManager:
             user_info=user_info,
             reactions=reactions,
             files=files,
+            replies_count=message_data.get("reply_count", 0),
         )
 
     def _convert_to_jira_ticket(

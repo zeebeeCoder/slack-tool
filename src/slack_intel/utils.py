@@ -26,7 +26,13 @@ def convert_slack_dicts_to_messages(raw_messages: List[Dict[str, Any]]) -> List[
     for msg_dict in raw_messages:
         # Create SlackMessage from dict - Pydantic will handle validation
         try:
-            slack_msg = SlackMessage(**msg_dict)
+            # Map Slack API field names to SlackMessage field names
+            # reply_count (API) → replies_count (model)
+            converted_dict = msg_dict.copy()
+            if "reply_count" in converted_dict:
+                converted_dict["replies_count"] = converted_dict.pop("reply_count")
+
+            slack_msg = SlackMessage(**converted_dict)
             slack_messages.append(slack_msg)
         except Exception as e:
             # Log error but continue processing other messages
