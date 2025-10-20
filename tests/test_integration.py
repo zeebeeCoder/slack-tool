@@ -20,11 +20,15 @@ from slack_intel import (
 # Load environment variables
 load_dotenv()
 
-# Skip integration tests if credentials are not available
-pytestmark = pytest.mark.skipif(
-    not os.getenv("SLACK_API_TOKEN"),
-    reason="SLACK_API_TOKEN not set - skipping integration tests"
-)
+# Mark all tests in this module as integration tests
+# and skip if credentials are not available
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not os.getenv("SLACK_API_TOKEN"),
+        reason="SLACK_API_TOKEN not set - skipping integration tests"
+    )
+]
 
 
 def load_test_channels() -> list[SlackChannel]:

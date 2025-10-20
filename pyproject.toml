@@ -34,6 +34,11 @@ slack-intel = "slack_intel.cli:cli"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (require API access, slower)",
+]
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"
