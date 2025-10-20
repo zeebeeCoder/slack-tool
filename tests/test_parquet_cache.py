@@ -16,6 +16,8 @@ from tests.fixtures import (
     sample_message_with_files,
     sample_message_with_jira,
     sample_channel,
+    sample_jira_ticket_basic,
+    sample_jira_ticket_full,
 )
 
 
@@ -331,3 +333,214 @@ class TestParquetCacheEdgeCases:
         # Date should be YYYY-MM-DD format
         with pytest.raises((ValueError, AssertionError)):
             cache.save_messages([sample_message_basic()], channel, "invalid-date")
+
+
+class TestParquetCacheJiraTickets:
+    """Test saving JIRA tickets to Parquet"""
+
+    @pytest.fixture(autouse=True)
+    def setup_teardown(self, tmp_path):
+        """Setup and cleanup test cache directory"""
+        self.cache_dir = tmp_path / "test_cache"
+        yield
+        if self.cache_dir.exists():
+            shutil.rmtree(self.cache_dir)
+
+    def test_save_single_jira_ticket(self):
+        """Test saving a single JIRA ticket to Parquet"""
+        from slack_intel.parquet_cache import ParquetCache
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        ticket = sample_jira_ticket_basic()
+
+        # Save JIRA ticket
+        file_path = cache.save_jira_tickets([ticket], "2023-10-18")
+
+        # Verify file was created
+        assert Path(file_path).exists()
+        assert "jira/dt=2023-10-18" in file_path
+        assert file_path.endswith(".parquet")
+
+    def test_save_multiple_jira_tickets(self):
+        """Test saving multiple JIRA tickets to Parquet"""
+        from slack_intel.parquet_cache import ParquetCache
+        import pyarrow.parquet as pq
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        tickets = [
+            sample_jira_ticket_basic(),
+            sample_jira_ticket_full(),
+        ]
+
+        file_path = cache.save_jira_tickets(tickets, "2023-10-18")
+
+        # Verify file and row count
+        assert Path(file_path).exists()
+        table = pq.read_table(file_path)
+        assert table.num_rows == 2
+
+    def test_jira_partition_by_date(self):
+        """Test that JIRA tickets are partitioned by date"""
+        from slack_intel.parquet_cache import ParquetCache
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        ticket = sample_jira_ticket_basic()
+
+        file1 = cache.save_jira_tickets([ticket], "2023-10-18")
+        file2 = cache.save_jira_tickets([ticket], "2023-10-19")
+
+        # Different dates = different partition paths
+        assert "dt=2023-10-18" in file1
+        assert "dt=2023-10-19" in file2
+        assert Path(file1).exists()
+        assert Path(file2).exists()
+
+    def test_jira_cached_at_timestamp_added(self):
+        """Test that cached_at timestamp is added automatically"""
+        from slack_intel.parquet_cache import ParquetCache
+        import pyarrow.parquet as pq
+        from datetime import datetime
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        ticket = sample_jira_ticket_basic()
+
+        before = datetime.utcnow()
+        file_path = cache.save_jira_tickets([ticket], "2023-10-18")
+        after = datetime.utcnow()
+
+        # Read data and verify cached_at exists
+        table = pq.read_table(file_path)
+        data = table.to_pylist()
+
+        assert len(data) == 1
+        assert "cached_at" in data[0]
+        assert data[0]["cached_at"] is not None
+
+        # Verify timestamp is within reasonable range
+        cached_at = data[0]["cached_at"]
+        assert before <= cached_at <= after
+
+    def test_jira_schema_correct(self):
+        """Test that JIRA Parquet schema matches expected structure"""
+        from slack_intel.parquet_cache import ParquetCache
+        import pyarrow.parquet as pq
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        ticket = sample_jira_ticket_full()
+
+        file_path = cache.save_jira_tickets([ticket], "2023-10-18")
+
+        # Read schema
+        table = pq.read_table(file_path)
+        schema = table.schema
+
+        # Verify required fields exist
+        required_fields = [
+            "ticket_id",
+            "summary",
+            "priority",
+            "issue_type",
+            "status",
+            "assignee",
+            "due_date",
+            "story_points",
+            "blocks",
+            "blocked_by",
+            "components",
+            "labels",
+            "progress_total",
+            "progress_done",
+            "progress_percentage",
+            "project",
+            "sprints",
+            "cached_at",
+        ]
+
+        schema_names = [field.name for field in schema]
+        for field_name in required_fields:
+            assert field_name in schema_names, f"Missing field: {field_name}"
+
+    def test_jira_nested_types_preserved(self):
+        """Test that nested JIRA types (sprints, dependencies) are preserved"""
+        from slack_intel.parquet_cache import ParquetCache
+        import pyarrow.parquet as pq
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        ticket = sample_jira_ticket_full()
+
+        file_path = cache.save_jira_tickets([ticket], "2023-10-18")
+
+        # Read data
+        table = pq.read_table(file_path)
+        data = table.to_pylist()
+
+        assert len(data) == 1
+        row = data[0]
+
+        # Verify sprints structure (list of structs)
+        assert "sprints" in row
+        assert isinstance(row["sprints"], list)
+        if len(row["sprints"]) > 0:
+            sprint = row["sprints"][0]
+            assert "name" in sprint
+            assert "state" in sprint
+
+        # Verify dependencies are lists
+        assert isinstance(row["blocks"], list)
+        assert isinstance(row["blocked_by"], list)
+        assert isinstance(row["components"], list)
+
+    def test_save_empty_jira_ticket_list(self):
+        """Test saving empty JIRA ticket list"""
+        from slack_intel.parquet_cache import ParquetCache
+        import pyarrow.parquet as pq
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+
+        # Should handle empty list gracefully
+        file_path = cache.save_jira_tickets([], "2023-10-18")
+
+        # File should exist but be empty
+        assert Path(file_path).exists()
+        table = pq.read_table(file_path)
+        assert table.num_rows == 0
+
+    def test_jira_overwrite_existing_partition(self):
+        """Test overwriting existing JIRA partition"""
+        from slack_intel.parquet_cache import ParquetCache
+        import pyarrow.parquet as pq
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+
+        # Write first batch
+        tickets1 = [sample_jira_ticket_basic()]
+        file1 = cache.save_jira_tickets(tickets1, "2023-10-18")
+
+        # Verify 1 row
+        table1 = pq.read_table(file1)
+        assert table1.num_rows == 1
+
+        # Overwrite with different batch
+        tickets2 = [
+            sample_jira_ticket_basic(),
+            sample_jira_ticket_full(),
+        ]
+        file2 = cache.save_jira_tickets(tickets2, "2023-10-18")
+
+        # Should be same file path
+        assert file1 == file2
+
+        # Should have 2 rows (overwritten)
+        table2 = pq.read_table(file2)
+        assert table2.num_rows == 2
+
+    def test_jira_date_validation(self):
+        """Test that invalid dates are rejected for JIRA tickets"""
+        from slack_intel.parquet_cache import ParquetCache
+
+        cache = ParquetCache(base_path=str(self.cache_dir))
+        ticket = sample_jira_ticket_basic()
+
+        # Date should be YYYY-MM-DD format
+        with pytest.raises((ValueError, AssertionError)):
+            cache.save_jira_tickets([ticket], "invalid-date")

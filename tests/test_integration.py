@@ -159,6 +159,249 @@ class TestJiraIntegration:
         assert "PROJ-456" in tickets
         print(f"\n✓ Extracted tickets: {tickets}")
 
+    @pytest.mark.skipif(
+        not os.getenv("JIRA_API_TOKEN"),
+        reason="JIRA_API_TOKEN not set"
+    )
+    async def test_fetch_jira_tickets_batch(self):
+        """Test batch fetching JIRA tickets"""
+        manager = SlackChannelManager()
+
+        # Get some real ticket IDs from Slack messages first
+        channels = load_test_channels()
+        if not channels:
+            pytest.skip("No .slack-intel.yaml config found")
+
+        channel = channels[0]
+        time_window = TimeWindow(days=7, hours=0)  # Look back 7 days
+
+        # Fetch messages
+        raw_messages = await manager.get_messages(
+            channel.id,
+            time_window.start_time,
+            time_window.end_time
+        )
+
+        if not raw_messages:
+            pytest.skip("No messages to extract JIRA tickets from")
+
+        # Extract JIRA ticket IDs
+        all_tickets = set()
+        for msg in raw_messages:
+            text = msg.get("text", "")
+            tickets = manager.extract_jira_tickets(text)
+            if tickets:
+                all_tickets.update(tickets)
+
+        if not all_tickets:
+            pytest.skip("No JIRA tickets found in messages")
+
+        # Fetch tickets in batch
+        ticket_list = list(all_tickets)[:10]  # Limit to 10 for test
+        jira_tickets = await manager.fetch_jira_tickets_batch(ticket_list)
+
+        # Verify results (some may fail due to permissions, that's ok)
+        assert isinstance(jira_tickets, list)
+        print(f"\n✓ Requested {len(ticket_list)} tickets")
+        print(f"✓ Successfully fetched {len(jira_tickets)} tickets")
+
+        # If we got any tickets, verify structure
+        if jira_tickets:
+            ticket = jira_tickets[0]
+            assert hasattr(ticket, "ticket")
+            assert hasattr(ticket, "summary")
+            assert hasattr(ticket, "status")
+            print(f"\n✓ Sample ticket: {ticket.ticket} - {ticket.summary[:50]}...")
+
+
+@pytest.mark.asyncio
+class TestJiraEnrichmentIntegration:
+    """Integration tests for end-to-end JIRA enrichment pipeline"""
+
+    @pytest.fixture(autouse=True)
+    def setup_teardown(self, tmp_path):
+        """Setup test cache directory"""
+        self.cache_dir = tmp_path / "jira_integration_cache"
+        self.cache = ParquetCache(base_path=str(self.cache_dir))
+        yield
+        # Cleanup
+        if self.cache_dir.exists():
+            shutil.rmtree(self.cache_dir)
+
+    @pytest.mark.skipif(
+        not os.getenv("JIRA_API_TOKEN"),
+        reason="JIRA_API_TOKEN not set"
+    )
+    async def test_slack_jira_enrichment_pipeline(self):
+        """Test full pipeline: Slack messages → Extract tickets → Enrich JIRA → Cache"""
+        channels = load_test_channels()
+        if not channels:
+            pytest.skip("No .slack-intel.yaml config found")
+
+        manager = SlackChannelManager()
+        channel = channels[0]
+        time_window = TimeWindow(days=7, hours=0)  # Look back 7 days
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Step 1: Fetch Slack messages
+        raw_messages = await manager.get_messages(
+            channel.id,
+            time_window.start_time,
+            time_window.end_time
+        )
+
+        if not raw_messages:
+            pytest.skip("No messages found")
+
+        messages = convert_slack_dicts_to_messages(raw_messages)
+
+        # Step 2: Save messages to cache
+        msg_path = self.cache.save_messages(messages, channel, today)
+        assert Path(msg_path).exists()
+        print(f"\n✓ Cached {len(messages)} messages")
+
+        # Step 3: Extract JIRA ticket IDs
+        all_ticket_ids = set()
+        for msg in messages:
+            parquet_dict = msg.to_parquet_dict()
+            if parquet_dict.get("jira_tickets"):
+                all_ticket_ids.update(parquet_dict["jira_tickets"])
+
+        if not all_ticket_ids:
+            pytest.skip("No JIRA tickets found in messages")
+
+        print(f"✓ Found {len(all_ticket_ids)} unique JIRA tickets")
+
+        # Step 4: Fetch JIRA tickets
+        jira_tickets = await manager.fetch_jira_tickets_batch(list(all_ticket_ids))
+
+        if not jira_tickets:
+            print("⚠ No JIRA tickets were successfully fetched (may be permissions issue)")
+            pytest.skip("No JIRA tickets fetched")
+
+        print(f"✓ Enriched {len(jira_tickets)} JIRA tickets")
+
+        # Step 5: Save JIRA tickets to cache
+        jira_path = self.cache.save_jira_tickets(jira_tickets, today)
+        assert Path(jira_path).exists()
+        print(f"✓ Saved JIRA tickets to {jira_path}")
+
+        # Step 6: Verify JIRA cache with DuckDB
+        conn = duckdb.connect()
+        result = conn.execute(f"""
+            SELECT
+                COUNT(*) as total_tickets,
+                COUNT(DISTINCT ticket_id) as unique_tickets,
+                COUNT(DISTINCT status) as unique_statuses
+            FROM '{self.cache_dir}/jira/**/*.parquet'
+        """).fetchone()
+
+        total, unique, statuses = result
+        assert total == len(jira_tickets)
+        assert unique == len(jira_tickets)
+        assert statuses >= 1
+
+        print(f"\n✓ JIRA cache validation:")
+        print(f"  Total tickets: {total}")
+        print(f"  Unique tickets: {unique}")
+        print(f"  Unique statuses: {statuses}")
+
+    @pytest.mark.skipif(
+        not os.getenv("JIRA_API_TOKEN"),
+        reason="JIRA_API_TOKEN not set"
+    )
+    async def test_message_jira_join_query(self):
+        """Test JOIN query between messages and JIRA tickets"""
+        channels = load_test_channels()
+        if not channels:
+            pytest.skip("No .slack-intel.yaml config found")
+
+        manager = SlackChannelManager()
+        channel = channels[0]
+        time_window = TimeWindow(days=7, hours=0)
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Fetch and cache messages
+        raw_messages = await manager.get_messages(
+            channel.id,
+            time_window.start_time,
+            time_window.end_time
+        )
+
+        if not raw_messages:
+            pytest.skip("No messages found")
+
+        messages = convert_slack_dicts_to_messages(raw_messages)
+        self.cache.save_messages(messages, channel, today)
+
+        # Extract and enrich JIRA tickets
+        all_ticket_ids = set()
+        for msg in messages:
+            parquet_dict = msg.to_parquet_dict()
+            if parquet_dict.get("jira_tickets"):
+                all_ticket_ids.update(parquet_dict["jira_tickets"])
+
+        if not all_ticket_ids:
+            pytest.skip("No JIRA tickets found")
+
+        jira_tickets = await manager.fetch_jira_tickets_batch(list(all_ticket_ids))
+
+        if not jira_tickets:
+            pytest.skip("No JIRA tickets fetched")
+
+        self.cache.save_jira_tickets(jira_tickets, today)
+
+        # Execute JOIN query
+        conn = duckdb.connect()
+        result = conn.execute(f"""
+            SELECT
+                m.text,
+                m.user_real_name,
+                j.ticket_id,
+                j.summary,
+                j.status,
+                j.assignee
+            FROM '{self.cache_dir}/messages/**/*.parquet' m,
+                 UNNEST(m.jira_tickets) AS t(ticket)
+            JOIN '{self.cache_dir}/jira/**/*.parquet' j
+                ON j.ticket_id = ticket
+            LIMIT 10
+        """).fetchall()
+
+        # Verify JOIN worked
+        assert len(result) > 0, "JOIN query should return results"
+
+        print(f"\n✓ JOIN query returned {len(result)} rows")
+        print("\n✓ Sample results:")
+        for row in result[:3]:
+            text, user, ticket, summary, status, assignee = row
+            print(f"  User: {user}")
+            print(f"  Ticket: {ticket} - {summary[:50]}...")
+            print(f"  Status: {status} | Assignee: {assignee}")
+            print(f"  Message: {text[:100]}...")
+            print()
+
+    async def test_jira_schema_validation(self):
+        """Test that JIRA Parquet schema matches expected structure"""
+        from slack_intel.parquet_cache import _create_jira_schema
+
+        schema = _create_jira_schema()
+
+        # Verify all required fields exist
+        required_fields = [
+            "ticket_id", "summary", "priority", "issue_type", "status",
+            "assignee", "due_date", "story_points", "blocks", "blocked_by",
+            "components", "labels", "progress_total", "progress_percentage",
+            "project", "sprints", "cached_at"
+        ]
+
+        schema_names = [field.name for field in schema]
+        for field_name in required_fields:
+            assert field_name in schema_names, f"Missing field: {field_name}"
+
+        print(f"\n✓ JIRA schema has {len(schema_names)} fields")
+        print(f"✓ All {len(required_fields)} required fields present")
+
 
 @pytest.mark.asyncio
 class TestParquetCacheIntegration:

@@ -1217,6 +1217,64 @@ class SlackChannelManager:
         raw_ticket_data = await self.get_ticket_info(ticket_id)
         return self._convert_to_jira_ticket(raw_ticket_data)
 
+    async def fetch_jira_tickets_batch(
+        self, ticket_ids: List[str]
+    ) -> List[JiraTicket]:
+        """Fetch multiple JIRA tickets in parallel with rate limiting
+
+        This method fetches JIRA tickets in parallel while respecting rate limits.
+        Failed ticket fetches are logged as warnings and excluded from results.
+
+        Args:
+            ticket_ids: List of unique JIRA ticket IDs to fetch
+
+        Returns:
+            List of successfully fetched JiraTicket models
+            (excludes tickets that failed to fetch)
+
+        Example:
+            >>> manager = SlackChannelManager()
+            >>> ticket_ids = ["PRD-123", "PRD-456", "PRD-789"]
+            >>> tickets = await manager.fetch_jira_tickets_batch(ticket_ids)
+            >>> print(f"Fetched {len(tickets)} tickets")
+        """
+        semaphore = asyncio.Semaphore(10)  # Max 10 concurrent JIRA requests
+
+        async def fetch_one(ticket_id: str) -> Optional[JiraTicket]:
+            """Fetch a single JIRA ticket with rate limiting"""
+            async with semaphore:
+                try:
+                    raw_data = await self.get_ticket_info(ticket_id)
+                    # Check if the response is an error
+                    if "error" in raw_data:
+                        self.logger.warning(
+                            f"JIRA ticket {ticket_id} not found or inaccessible: "
+                            f"{raw_data.get('error')}"
+                        )
+                        return None
+                    return self._convert_to_jira_ticket(raw_data)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to fetch JIRA ticket {ticket_id}: {e}"
+                    )
+                    return None  # Continue with warning
+
+        # Fetch all tickets in parallel
+        results = await asyncio.gather(
+            *[fetch_one(ticket_id) for ticket_id in ticket_ids],
+            return_exceptions=False
+        )
+
+        # Filter out None (failed fetches) and return successful tickets
+        successful_tickets = [ticket for ticket in results if ticket is not None]
+
+        self.logger.info(
+            f"Successfully fetched {len(successful_tickets)} of "
+            f"{len(ticket_ids)} JIRA tickets"
+        )
+
+        return successful_tickets
+
     async def get_thread_data(
         self, thread_ts: str, channel_id: str
     ) -> Optional[SlackThread]:

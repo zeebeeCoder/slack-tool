@@ -16,6 +16,9 @@ import json
 from .slack_channels import SlackChannelManager, SlackChannel, TimeWindow
 from .parquet_cache import ParquetCache
 from .utils import convert_slack_dicts_to_messages
+from .parquet_message_reader import ParquetMessageReader
+from .thread_reconstructor import ThreadReconstructor
+from .message_view_formatter import MessageViewFormatter, ViewContext
 
 console = Console()
 
@@ -67,7 +70,8 @@ def cli():
 @click.option('--hours', '-h', default=0, help='Hours to look back (default: 0)')
 @click.option('--cache-path', default='cache/raw', help='Cache directory (default: cache/raw)')
 @click.option('--date', help='Partition date YYYY-MM-DD (default: today)')
-def cache(channel, days, hours, cache_path, date):
+@click.option('--enrich-jira', is_flag=True, help='Fetch and cache JIRA ticket metadata')
+def cache(channel, days, hours, cache_path, date, enrich_jira):
     """Fetch messages from Slack and save to Parquet cache
 
     Examples:
@@ -82,11 +86,15 @@ def cache(channel, days, hours, cache_path, date):
         \b
         # Override multiple channels
         slack-intel cache -c C9876543210 -c C1111111111 --days 1
+
+        \b
+        # Cache with JIRA enrichment
+        slack-intel cache --enrich-jira --days 7
     """
-    asyncio.run(_cache_async(channel, days, hours, cache_path, date))
+    asyncio.run(_cache_async(channel, days, hours, cache_path, date, enrich_jira))
 
 
-async def _cache_async(channel_ids, days, hours, cache_path, partition_date):
+async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enrich_jira):
     """Async implementation of cache command"""
 
     # Determine channels to process
@@ -112,12 +120,14 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date):
         f"Processing {len(channels)} channels\n"
         f"Time window: {days} days, {hours} hours\n"
         f"Cache path: {cache_path}\n"
-        f"Partition date: {date_str}",
+        f"Partitioning: By message timestamp (not cache date)\n"
+        f"JIRA enrichment: {'[green]enabled[/green]' if enrich_jira else '[dim]disabled[/dim]'}",
         border_style="blue"
     ))
 
-    # Results table
+    # Results table and JIRA ticket collection
     results = []
+    all_jira_ticket_ids = set()  # Collect unique JIRA tickets across all channels
 
     # Process each channel
     for channel in channels:
@@ -155,18 +165,50 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date):
 
                 progress.update(task, description=f"[cyan]Caching {channel.name} ({len(messages)} messages)...")
 
-                # Save to cache
-                file_path = parquet_cache.save_messages(messages, channel, date_str)
+                # Group messages by their actual date (from timestamp)
+                # This allows querying by message date, not cache date
+                from collections import defaultdict
+                from datetime import datetime as dt
 
-                # Get file size
-                file_size = Path(file_path).stat().st_size
-                file_size_mb = file_size / (1024 * 1024)
+                messages_by_date = defaultdict(list)
+                for msg in messages:
+                    # Extract date from message timestamp
+                    if msg.timestamp:
+                        # Parse ISO timestamp and get date
+                        try:
+                            msg_dt = dt.fromisoformat(msg.timestamp.replace('Z', '+00:00'))
+                            msg_date = msg_dt.strftime('%Y-%m-%d')
+                            messages_by_date[msg_date].append(msg)
+                        except (ValueError, AttributeError):
+                            # Fallback to partition_date if timestamp is invalid
+                            messages_by_date[date_str].append(msg)
+                    else:
+                        # No timestamp, use partition date
+                        messages_by_date[date_str].append(msg)
+
+                # Save messages partitioned by their actual date
+                total_size = 0
+                partition_paths = []
+                for msg_date, date_messages in sorted(messages_by_date.items()):
+                    file_path = parquet_cache.save_messages(date_messages, channel, msg_date)
+                    partition_paths.append(file_path)
+                    total_size += Path(file_path).stat().st_size
+
+                # Extract JIRA tickets from messages if enrichment is enabled
+                if enrich_jira:
+                    for message in messages:
+                        jira_tickets = message.to_parquet_dict().get('jira_tickets', [])
+                        if jira_tickets:
+                            all_jira_ticket_ids.update(jira_tickets)
+
+                # Calculate total size
+                file_size_mb = total_size / (1024 * 1024)
 
                 results.append({
                     "channel": channel.name,
                     "messages": len(messages),
                     "status": "cached",
-                    "path": file_path,
+                    "path": f"{len(partition_paths)} partitions: {min(messages_by_date.keys())} to {max(messages_by_date.keys())}",
                     "size_mb": file_size_mb
                 })
 
@@ -207,6 +249,64 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date):
         total_messages = sum(r["messages"] for r in results)
         total_size = sum(r.get("size_mb", 0) for r in results)
         console.print(f"\n[bold]Total:[/bold] {total_messages} messages, {total_size:.2f} MB cached")
+
+    # JIRA Enrichment Phase
+    if enrich_jira and all_jira_ticket_ids:
+        console.print()
+        console.print(Panel.fit(
+            f"[bold cyan]🎫 JIRA Enrichment Phase[/bold cyan]\n"
+            f"Fetching metadata for {len(all_jira_ticket_ids)} unique tickets",
+            border_style="cyan"
+        ))
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task(
+                f"[cyan]Fetching {len(all_jira_ticket_ids)} JIRA tickets...",
+                total=len(all_jira_ticket_ids)
+            )
+
+            try:
+                # Fetch JIRA tickets in parallel
+                jira_tickets = await manager.fetch_jira_tickets_batch(
+                    list(all_jira_ticket_ids)
+                )
+                progress.update(task, completed=len(all_jira_ticket_ids))
+
+                # Save JIRA tickets to cache
+                if jira_tickets:
+                    jira_path = parquet_cache.save_jira_tickets(jira_tickets, date_str)
+                    jira_file_size = Path(jira_path).stat().st_size / (1024 * 1024)
+
+                    console.print(
+                        f"[green]  ✓ Cached {len(jira_tickets)} JIRA tickets "
+                        f"({jira_file_size:.2f} MB)[/green]"
+                    )
+                    console.print(f"[dim]  Path: {jira_path}[/dim]")
+
+                    # Show warnings if some tickets failed
+                    failed_count = len(all_jira_ticket_ids) - len(jira_tickets)
+                    if failed_count > 0:
+                        console.print(
+                            f"[yellow]  ⚠ {failed_count} tickets failed to fetch "
+                            f"(see warnings above)[/yellow]"
+                        )
+                else:
+                    console.print(
+                        "[yellow]  ⚠ No JIRA tickets were successfully fetched[/yellow]"
+                    )
+
+            except Exception as e:
+                console.print(f"[red]  ✗ JIRA enrichment failed: {e}[/red]")
+
+    elif enrich_jira and not all_jira_ticket_ids:
+        console.print()
+        console.print("[yellow]No JIRA tickets found in messages[/yellow]")
 
 
 @cli.command()
@@ -383,6 +483,106 @@ def stats(cache_path, format):
 
     except Exception as e:
         console.print(f"[red]Error reading cache: {e}[/red]")
+
+
+@cli.command()
+@click.option('--channel', '-c', required=True, help='Channel name to view')
+@click.option('--date', '-d', help='Date to view (YYYY-MM-DD, default: today)')
+@click.option('--start-date', help='Start date for range (YYYY-MM-DD)')
+@click.option('--end-date', help='End date for range (YYYY-MM-DD)')
+@click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
+@click.option('--output', '-o', help='Output file (default: print to console)')
+def view(channel, date, start_date, end_date, cache_path, output):
+    """Generate formatted message view from Parquet cache
+
+    Examples:
+        \\b
+        # View single day
+        slack-intel view --channel backend-devs --date 2025-10-20
+
+        \\b
+        # View date range
+        slack-intel view -c engineering --start-date 2025-10-18 --end-date 2025-10-20
+
+        \\b
+        # Save to file
+        slack-intel view -c general --date 2025-10-20 -o output.txt
+    """
+    try:
+        # Initialize reader
+        reader = ParquetMessageReader(base_path=cache_path)
+
+        # Handle channel naming: try exact name first, then with "channel_" prefix
+        # This handles both config-based channels (named) and CLI channel IDs
+        def try_read_channel(channel_name: str, date: str):
+            """Try reading channel, handling both named channels and raw IDs"""
+            # Try exact name first
+            messages = reader.read_channel(channel_name, date)
+            if messages:
+                return messages, channel_name
+
+            # If no messages and channel name doesn't start with "channel_", try with prefix
+            if not channel_name.startswith("channel_"):
+                prefixed_name = f"channel_{channel_name}"
+                messages = reader.read_channel(prefixed_name, date)
+                if messages:
+                    return messages, prefixed_name
+
+            return [], channel_name
+
+        # Determine date range
+        if start_date and end_date:
+            date_range_str = f"{start_date} to {end_date}"
+            console.print(f"[dim]Reading messages from {channel} ({date_range_str})...[/dim]")
+            flat_messages = reader.read_channel_range(channel, start_date, end_date)
+            # TODO: Handle channel prefix for date ranges too
+        elif date:
+            date_range_str = date
+            console.print(f"[dim]Reading messages from {channel} ({date})...[/dim]")
+            flat_messages, actual_channel = try_read_channel(channel, date)
+            channel = actual_channel  # Update channel name for display
+        else:
+            # Default to today
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            date_range_str = date_str
+            console.print(f"[dim]Reading messages from {channel} ({date_str})...[/dim]")
+            flat_messages, actual_channel = try_read_channel(channel, date_str)
+            channel = actual_channel  # Update channel name for display
+
+        if not flat_messages:
+            console.print(f"[yellow]No messages found in {channel} for {date_range_str}[/yellow]")
+            console.print("[dim]Try a different date range or check 'slack-intel stats' to see available data.[/dim]")
+            return
+
+        console.print(f"[green]Found {len(flat_messages)} messages[/green]")
+
+        # Reconstruct threads
+        console.print("[dim]Reconstructing thread structure...[/dim]")
+        reconstructor = ThreadReconstructor()
+        structured_messages = reconstructor.reconstruct(flat_messages)
+
+        # Format view
+        console.print("[dim]Formatting view...[/dim]")
+        context = ViewContext(
+            channel_name=channel,
+            date_range=date_range_str
+        )
+        formatter = MessageViewFormatter()
+        view_output = formatter.format(structured_messages, context)
+
+        # Output
+        if output:
+            output_path = Path(output)
+            output_path.write_text(view_output)
+            console.print(f"[green]✓ View saved to {output}[/green]")
+        else:
+            console.print()
+            console.print(view_output)
+
+    except Exception as e:
+        console.print(f"[red]Error generating view: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
 
 if __name__ == "__main__":
