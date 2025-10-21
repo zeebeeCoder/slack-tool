@@ -24,10 +24,10 @@ LLM-optimized Slack message processing and intelligence extraction.
 
 - **LLM-Optimized Text Generation**: Formats Slack conversations for optimal LLM consumption
 - **Thread Clustering**: Groups messages with their replies spatially
-- **JIRA Integration**: Enriches ticket references with metadata inline
+- **SQL-Based JIRA Enrichment**: DuckDB-powered JOIN operations for displaying ticket metadata (summary, status, priority, assignee)
 - **Rich Terminal Output**: Beautiful console display using Rich library
 - **Async Processing**: Concurrent message fetching and processing
-- **Parquet Caching**: Column-based storage for efficient cross-channel analysis (Phase 2a)
+- **Parquet Caching**: Column-based storage for efficient cross-channel analysis
 
 ## Configuration
 
@@ -35,6 +35,18 @@ Required environment variables:
 - `SLACK_API_TOKEN`: Your Slack bot token
 - `JIRA_USER_NAME`: Your JIRA email
 - `JIRA_API_TOKEN`: Your JIRA API token
+
+Optional configuration via `.slack-intel.yaml`:
+```yaml
+# JIRA Configuration
+jira:
+  server: https://your-domain.atlassian.net
+
+# Default channels
+default_channels:
+  - channel_C1234567890
+  - backend-devs
+```
 
 ## Output
 
@@ -54,6 +66,9 @@ Cache Slack messages in columnar Parquet format for efficient cross-channel anal
 # Cache last 10 days from specific channel
 slack-intel cache --days 10 --channel C1234567890
 
+# Cache with JIRA enrichment (fetches ticket metadata)
+slack-intel cache --days 10 --channel C1234567890 --enrich-jira
+
 # Cache multiple channels
 slack-intel cache --days 7 -c C9876543210 -c C1111111111
 
@@ -71,6 +86,18 @@ slack-intel query --interactive
 
 # Export as JSON
 slack-intel query -q "SELECT * FROM 'cache/raw/messages/**/*.parquet' LIMIT 10" --format json
+```
+
+**View formatted messages:**
+```bash
+# View messages from a specific date
+slack-intel view --channel C1234567890 --date 2025-10-20
+
+# View date range with JIRA enrichment
+slack-intel view -c C1234567890 --start-date 2025-10-18 --end-date 2025-10-20
+
+# Use channel name from config
+slack-intel view -c backend-devs --date 2025-10-20
 ```
 
 **View cache statistics:**
