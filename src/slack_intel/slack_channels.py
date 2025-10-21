@@ -6,6 +6,7 @@ import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from dotenv import load_dotenv
@@ -488,12 +489,38 @@ class SlackChannelManager:
 
     def _init_jira(self) -> JIRA:
         """Initialize JIRA client"""
+        # Try to load JIRA server from config file
+        jira_server = os.environ.get("JIRA_SERVER")
+
+        if not jira_server:
+            # Try to load from .slack-intel.yaml
+            config_paths = [
+                Path(".slack-intel.yaml"),
+                Path.home() / ".slack-intel.yaml",
+            ]
+
+            for config_path in config_paths:
+                if config_path.exists():
+                    try:
+                        import yaml
+                        with open(config_path) as f:
+                            config = yaml.safe_load(f)
+                            if config and "jira" in config and "server" in config["jira"]:
+                                jira_server = config["jira"]["server"]
+                                break
+                    except Exception:
+                        continue
+
+        # Fallback to default if still not found
+        if not jira_server:
+            jira_server = "https://your-domain.atlassian.net"
+
         return JIRA(
             basic_auth=(
                 os.environ["JIRA_USER_NAME"],
                 os.environ["JIRA_API_TOKEN"],
             ),
-            server="https://your-domain.atlassian.net",
+            server=jira_server,
         )
 
     async def get_messages(

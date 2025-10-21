@@ -16,10 +16,11 @@ import json
 from .slack_channels import SlackChannelManager, SlackChannel, TimeWindow
 from .parquet_cache import ParquetCache
 from .utils import convert_slack_dicts_to_messages
-from .parquet_message_reader import ParquetMessageReader
 from .parquet_user_reader import ParquetUserReader
 from .thread_reconstructor import ThreadReconstructor
 from .message_view_formatter import MessageViewFormatter, ViewContext
+from .sql_view_composer import SqlViewComposer
+from .enriched_message_view_formatter import EnrichedMessageViewFormatter
 
 console = Console()
 
@@ -636,8 +637,8 @@ def view(channel, date, start_date, end_date, cache_path, output):
         slack-intel view -c general --date 2025-10-20 -o output.txt
     """
     try:
-        # Initialize readers
-        reader = ParquetMessageReader(base_path=cache_path)
+        # Initialize SQL view composer and user reader
+        composer = SqlViewComposer(base_path=cache_path)
         user_reader = ParquetUserReader(base_path=cache_path)
 
         # Load cached users for mention resolution
@@ -653,14 +654,14 @@ def view(channel, date, start_date, end_date, cache_path, output):
         def try_read_channel(channel_name: str, date: str):
             """Try reading channel, handling both named channels and raw IDs"""
             # Try exact name first
-            messages = reader.read_channel(channel_name, date)
+            messages = composer.read_messages_enriched(channel_name, date)
             if messages:
                 return messages, channel_name
 
             # If no messages and channel name doesn't start with "channel_", try with prefix
             if not channel_name.startswith("channel_"):
                 prefixed_name = f"channel_{channel_name}"
-                messages = reader.read_channel(prefixed_name, date)
+                messages = composer.read_messages_enriched(prefixed_name, date)
                 if messages:
                     return messages, prefixed_name
 
@@ -669,19 +670,25 @@ def view(channel, date, start_date, end_date, cache_path, output):
         # Determine date range
         if start_date and end_date:
             date_range_str = f"{start_date} to {end_date}"
-            console.print(f"[dim]Reading messages from {channel} ({date_range_str})...[/dim]")
-            flat_messages = reader.read_channel_range(channel, start_date, end_date)
-            # TODO: Handle channel prefix for date ranges too
+            console.print(f"[dim]Reading enriched messages from {channel} ({date_range_str})...[/dim]")
+            # Try exact channel name first
+            flat_messages = composer.read_messages_enriched_range(channel, start_date, end_date)
+            # If no messages and channel doesn't start with "channel_", try with prefix
+            if not flat_messages and not channel.startswith("channel_"):
+                prefixed_name = f"channel_{channel}"
+                flat_messages = composer.read_messages_enriched_range(prefixed_name, start_date, end_date)
+                if flat_messages:
+                    channel = prefixed_name
         elif date:
             date_range_str = date
-            console.print(f"[dim]Reading messages from {channel} ({date})...[/dim]")
+            console.print(f"[dim]Reading enriched messages from {channel} ({date})...[/dim]")
             flat_messages, actual_channel = try_read_channel(channel, date)
             channel = actual_channel  # Update channel name for display
         else:
             # Default to today
             date_str = datetime.now().strftime("%Y-%m-%d")
             date_range_str = date_str
-            console.print(f"[dim]Reading messages from {channel} ({date_str})...[/dim]")
+            console.print(f"[dim]Reading enriched messages from {channel} ({date_str})...[/dim]")
             flat_messages, actual_channel = try_read_channel(channel, date_str)
             channel = actual_channel  # Update channel name for display
 
@@ -697,13 +704,13 @@ def view(channel, date, start_date, end_date, cache_path, output):
         reconstructor = ThreadReconstructor()
         structured_messages = reconstructor.reconstruct(flat_messages)
 
-        # Format view
-        console.print("[dim]Formatting view...[/dim]")
+        # Format view with JIRA enrichment
+        console.print("[dim]Formatting enriched view...[/dim]")
         context = ViewContext(
             channel_name=channel,
             date_range=date_range_str
         )
-        formatter = MessageViewFormatter()
+        formatter = EnrichedMessageViewFormatter()
         view_output = formatter.format(structured_messages, context, cached_users=cached_users)
 
         # Output
