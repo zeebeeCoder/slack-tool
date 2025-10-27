@@ -23,6 +23,16 @@ class EnrichedMessageViewFormatter(MessageViewFormatter):
         >>> print(view)
     """
 
+    def __init__(self, template: str = "llm_optimized", resolve_mentions: bool = True, bucket_type: str = None):
+        """Initialize enriched formatter
+
+        Args:
+            template: Output template type (default: "llm_optimized")
+            resolve_mentions: Whether to resolve user mentions
+            bucket_type: Time bucketing for multi-channel views
+        """
+        super().__init__(template=template, resolve_mentions=resolve_mentions, bucket_type=bucket_type)
+
     def _format_jira_tickets(self, msg: Dict[str, Any], indent: str = "   ") -> List[str]:
         """Format JIRA tickets with enriched metadata if available
 
@@ -64,14 +74,14 @@ class EnrichedMessageViewFormatter(MessageViewFormatter):
             meta = metadata_map.get(ticket_id)
 
             if meta:
-                # Enriched display
-                priority = meta.get("priority", "Unknown")
-                status = meta.get("status", "Unknown")
-                summary = meta.get("summary", "No summary")
-                assignee = meta.get("assignee", "Unassigned")
+                # Enriched display - handle None values
+                priority = meta.get("priority") or "Unknown"
+                status = meta.get("status") or "Unknown"
+                summary = meta.get("summary") or "No summary"
+                assignee = meta.get("assignee") or "Unassigned"
 
                 # Truncate summary if too long
-                if len(summary) > 50:
+                if summary and len(summary) > 50:
                     summary = summary[:47] + "..."
 
                 # Format: • TICKET-ID [Priority] Status
@@ -85,6 +95,40 @@ class EnrichedMessageViewFormatter(MessageViewFormatter):
                 lines.append(f"{indent}   • {ticket_id}")
 
         return lines
+
+    def _format_message_compact(self, msg: Dict[str, Any], msg_number: int) -> str:
+        """Format a message in compact style with enriched JIRA for bucketed views
+
+        Overrides parent method to use enriched JIRA ticket display.
+        """
+        lines = []
+
+        # User and timestamp
+        user_name = msg.get("user_real_name", "Unknown User")
+        timestamp = self._format_timestamp_short(msg.get("timestamp", ""))
+
+        text = self._resolve_mentions(msg.get("text", ""))
+        lines.append(f"  💬 {user_name} at {timestamp}:")
+        lines.append(f"     {text}")
+
+        # Reactions (compact)
+        reactions = msg.get("reactions", [])
+        if reactions is not None and len(reactions) > 0:
+            reaction_strs = [f"{r.get('emoji', '')}({r.get('count', 0)})" for r in reactions]
+            lines.append(f"     😊 {', '.join(reaction_strs)}")
+
+        # Files (compact)
+        files = msg.get("files", [])
+        if files is not None and len(files) > 0:
+            file_names = [f.get("name", "file") for f in files]
+            lines.append(f"     📎 {', '.join(file_names)}")
+
+        # JIRA tickets with enrichment (compact)
+        jira_lines = self._format_jira_tickets(msg, indent="     ")
+        if jira_lines:
+            lines.extend(jira_lines)
+
+        return "\n".join(lines)
 
     def _format_message(self, msg: Dict[str, Any], msg_number: int) -> str:
         """Format a parent message with enriched JIRA tickets
@@ -106,6 +150,13 @@ class EnrichedMessageViewFormatter(MessageViewFormatter):
             clipped_indicator = " (🔗 Thread clipped)"
 
         lines.append(f"💬 MESSAGE #{msg_number}{clipped_indicator}")
+
+        # Show channel name if multi-channel context (like user timeline)
+        if hasattr(self, 'context') and self.context:
+            context_channels = getattr(self.context, 'channels', [])
+            if context_channels and len(context_channels) > 1:
+                channel = msg.get("channel", "unknown")
+                lines.append(f"📍 Channel: #{channel}")
 
         # User and timestamp
         user_name = msg.get("user_real_name", "Unknown User")

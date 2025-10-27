@@ -119,3 +119,45 @@ class ParquetUserReader:
             Number of users in cache, or 0 if cache doesn't exist
         """
         return len(self.read_users())
+
+    def find_user_by_name(self, username: str) -> Optional[str]:
+        """Find user_id by matching username (fuzzy)
+
+        Searches for username in both user_name and user_real_name fields.
+        Case-insensitive partial matching.
+
+        Args:
+            username: Username to search for (e.g., "zeebee" or "Tarun")
+
+        Returns:
+            user_id if found, None otherwise
+
+        Example:
+            >>> reader = ParquetUserReader()
+            >>> reader.find_user_by_name("zeebee")
+            'U02JRGK9TCG'
+            >>> reader.find_user_by_name("Tarun Katial")
+            'U01234ABCD'
+        """
+        users = self.read_users()
+        username_lower = username.lower()
+
+        # First pass: exact match on user_name
+        for user_id, user_data in users.items():
+            user_name = user_data.get('user_name', '')
+            if user_name and user_name.lower() == username_lower:
+                return user_id
+
+        # Second pass: partial match on user_name
+        for user_id, user_data in users.items():
+            user_name = user_data.get('user_name', '')
+            if user_name and username_lower in user_name.lower():
+                return user_id
+
+        # Third pass: partial match on user_real_name
+        for user_id, user_data in users.items():
+            real_name = user_data.get('user_real_name', '')
+            if real_name and username_lower in real_name.lower():
+                return user_id
+
+        return None

@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
+from .time_bucketer import TimeBucketer, TimeBucket
 
 
 @dataclass
@@ -42,16 +43,18 @@ class MessageViewFormatter:
         >>> print(view)
     """
 
-    def __init__(self, template: str = "llm_optimized", resolve_mentions: bool = True):
+    def __init__(self, template: str = "llm_optimized", resolve_mentions: bool = True, bucket_type: str = None):
         """Initialize formatter
 
         Args:
             template: Output template type (default: "llm_optimized")
                      Options: "llm_optimized", "compact"
             resolve_mentions: Whether to resolve user mentions from <@USER_ID> to @username
+            bucket_type: Time bucketing for multi-channel views ("hour", "day", "none", or None for single-channel)
         """
         self.template = template
         self.resolve_mentions = resolve_mentions
+        self.bucket_type = bucket_type
         self.user_mapping: Dict[str, str] = {}  # user_id -> display name
 
     def format(
@@ -74,10 +77,25 @@ class MessageViewFormatter:
         if not messages:
             return self._format_empty_view(context)
 
+        # Store context for use in formatting methods
+        self.context = context
+
         # Build user ID -> name mapping if mention resolution is enabled
         if self.resolve_mentions:
             self._build_user_mapping(messages, cached_users=cached_users)
 
+        # Check if multi-channel view with bucketing
+        if self.bucket_type and len(context.channels) > 1:
+            return self._format_bucketed_view(messages, context)
+        else:
+            return self._format_single_channel_view(messages, context)
+
+    def _format_single_channel_view(
+        self,
+        messages: List[Dict[str, Any]],
+        context: ViewContext
+    ) -> str:
+        """Format traditional single-channel view (original behavior)"""
         output_lines = []
 
         # Header
@@ -136,6 +154,82 @@ class MessageViewFormatter:
 
         return "\n".join(output_lines)
 
+    def _format_bucketed_view(
+        self,
+        messages: List[Dict[str, Any]],
+        context: ViewContext
+    ) -> str:
+        """Format multi-channel view with time bucketing
+
+        Groups messages into time buckets (hour/day), then within each bucket
+        displays messages grouped by channel for better UX.
+        """
+        output_lines = []
+
+        # Header
+        output_lines.extend(self._format_header(context, messages))
+        output_lines.append("")
+
+        # Create time bucketer and bucket messages
+        bucketer = TimeBucketer(bucket_type=self.bucket_type)
+        buckets = bucketer.bucket_messages(messages)
+
+        # Track global stats
+        total_message_count = 0
+        total_thread_count = 0
+        total_reply_count = 0
+
+        # Format each bucket
+        for bucket_idx, bucket in enumerate(buckets, 1):
+            output_lines.extend(self._format_bucket_header(bucket, bucket_idx))
+            output_lines.append("")
+
+            # Format messages for each channel in this bucket
+            for channel in bucket.get_channels():
+                channel_messages = bucket.messages_by_channel[channel]
+
+                output_lines.append(f"📱 #{channel} ({len(channel_messages)} messages)")
+                output_lines.append("")
+
+                # Format messages in this channel
+                for msg_idx, msg in enumerate(channel_messages, 1):
+                    total_message_count += 1
+
+                    # Format message (simplified for bucketed view)
+                    formatted_msg = self._format_message_compact(msg, msg_idx)
+                    output_lines.append(formatted_msg)
+
+                    # Check for thread replies
+                    replies = msg.get("replies", [])
+                    if replies:
+                        total_thread_count += 1
+                        total_reply_count += len(replies)
+
+                        output_lines.append("")
+                        output_lines.append("  🧵 THREAD REPLIES:")
+
+                        for reply_idx, reply in enumerate(replies, 1):
+                            formatted_reply = self._format_reply(reply, reply_idx)
+                            output_lines.append(formatted_reply)
+
+                    output_lines.append("")
+
+                output_lines.append("-" * 50)
+                output_lines.append("")
+
+            # Bucket separator
+            output_lines.append("=" * 80)
+            output_lines.append("")
+
+        # Overall summary
+        output_lines.extend(self._format_summary(
+            total_message_count,
+            total_thread_count,
+            total_reply_count
+        ))
+
+        return "\n".join(output_lines)
+
     def _format_header(self, context: ViewContext, messages: List[Dict[str, Any]]) -> List[str]:
         """Format header section"""
         lines = []
@@ -155,6 +249,56 @@ class MessageViewFormatter:
 
         return lines
 
+    def _format_bucket_header(self, bucket: TimeBucket, bucket_number: int) -> List[str]:
+        """Format header for a time bucket"""
+        lines = []
+
+        # Format time range based on bucket type
+        if self.bucket_type == "hour":
+            time_label = bucket.start_time.strftime("%Y-%m-%d %H:00-%H:59")
+        elif self.bucket_type == "day":
+            time_label = bucket.start_time.strftime("%Y-%m-%d")
+        else:
+            time_label = "All Messages"
+
+        lines.append("=" * 80)
+        lines.append(f"📅 TIME BUCKET: {time_label}")
+        lines.append(f"   Total Messages: {bucket.total_messages} across {bucket.get_channel_count()} channels")
+        lines.append("=" * 80)
+
+        return lines
+
+    def _format_message_compact(self, msg: Dict[str, Any], msg_number: int) -> str:
+        """Format a message in compact style for bucketed views"""
+        lines = []
+
+        # User and timestamp
+        user_name = msg.get("user_real_name", "Unknown User")
+        timestamp = self._format_timestamp_short(msg.get("timestamp", ""))
+
+        text = self._resolve_mentions(msg.get("text", ""))
+        lines.append(f"  💬 {user_name} at {timestamp}:")
+        lines.append(f"     {text}")
+
+        # Reactions (compact)
+        reactions = msg.get("reactions", [])
+        if reactions:
+            reaction_strs = [f"{r.get('emoji', '')}({r.get('count', 0)})" for r in reactions]
+            lines.append(f"     😊 {', '.join(reaction_strs)}")
+
+        # Files (compact)
+        files = msg.get("files", [])
+        if files:
+            file_names = [f.get("name", "file") for f in files]
+            lines.append(f"     📎 {', '.join(file_names)}")
+
+        # JIRA tickets
+        jira_tickets = msg.get("jira_tickets", [])
+        if jira_tickets:
+            lines.append(f"     🎫 {', '.join(jira_tickets)}")
+
+        return "\n".join(lines)
+
     def _format_message(self, msg: Dict[str, Any], msg_number: int) -> str:
         """Format a single parent message"""
         lines = []
@@ -165,6 +309,13 @@ class MessageViewFormatter:
             clipped_indicator = " (🔗 Thread clipped)"
 
         lines.append(f"💬 MESSAGE #{msg_number}{clipped_indicator}")
+
+        # Show channel name if multi-channel context (like user timeline)
+        if hasattr(self, 'context') and self.context:
+            context_channels = getattr(self.context, 'channels', [])
+            if context_channels and len(context_channels) > 1:
+                channel = msg.get("channel", "unknown")
+                lines.append(f"📍 Channel: #{channel}")
 
         # User and timestamp
         user_name = msg.get("user_real_name", "Unknown User")
@@ -315,6 +466,25 @@ class MessageViewFormatter:
         # Pattern: <@USER_ID> where USER_ID starts with U
         pattern = r'<@(U[A-Z0-9]+)>'
         return re.sub(pattern, replace_mention, text)
+
+    def _format_timestamp_short(self, timestamp_str: str) -> str:
+        """Format timestamp to short readable format (HH:MM only)
+
+        Args:
+            timestamp_str: ISO 8601 timestamp string
+
+        Returns:
+            Formatted timestamp (e.g., "10:30")
+        """
+        if not timestamp_str:
+            return "unknown"
+
+        try:
+            ts = timestamp_str.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts)
+            return dt.strftime("%H:%M")
+        except (ValueError, AttributeError):
+            return timestamp_str[:5] if len(timestamp_str) >= 5 else timestamp_str
 
     def _format_timestamp(self, timestamp_str: str) -> str:
         """Format ISO timestamp to readable format with relative time

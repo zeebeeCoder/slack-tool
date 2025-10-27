@@ -730,13 +730,19 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
         # Read messages based on user timeline vs regular view
         if is_user_timeline:
             # User timeline mode - fetch user's messages across channels
-            console.print(f"[dim]Reading messages from user '{user}' ({date_range_str})...[/dim]")
-
-            # Resolve username to user_id
+            # Resolve username to user_id and get actual user_name
             user_id = user_reader.find_user_by_name(user)
             if not user_id:
-                console.print(f"[yellow]Warning: Could not find user '{user}' in cache[/yellow]")
-                console.print("[dim]User lookup uses cached data - the user may not have posted recently[/dim]")
+                console.print(f"[yellow]Could not find user '{user}' in cache[/yellow]")
+                console.print("[dim]User lookup uses cached data - try a different name or check available users[/dim]")
+                return
+
+            # Get the actual user_name from cache (e.g., "tarun465" for display name "Tarun")
+            user_data = user_reader.get_user(user_id)
+            actual_user_name = user_data.get('user_name') if user_data else user
+            user_display_name = user_data.get('user_real_name', actual_user_name) if user_data else user
+
+            console.print(f"[dim]Reading messages from {user_display_name} (@{actual_user_name}) ({date_range_str})...[/dim]")
 
             # Normalize channel names (try with prefix)
             channels_with_data = []
@@ -756,9 +762,9 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
                 console.print(f"[yellow]No channel data found for {date_range_str}[/yellow]")
                 return
 
-            # Fetch user timeline with SQL-level filtering
+            # Fetch user timeline with SQL-level filtering using actual user_name
             flat_messages = composer.read_user_timeline_enriched(
-                user_name=user,
+                user_name=actual_user_name,
                 channels=channels_with_data,
                 start_date=start_date,
                 end_date=end_date,
