@@ -471,17 +471,62 @@ class SlackChannelManager:
         self.logger = logging.getLogger(__name__)
         self.logger.debug("Initializing SlackChannelManager")
         self._validate_env()
-        self.client: AsyncWebClient = AsyncWebClient(
-            token=os.environ["SLACK_API_TOKEN"]
-        )
+        slack_token = self._get_slack_token()
+        self.client: AsyncWebClient = AsyncWebClient(token=slack_token)
         self.user_cache: Dict[str, Any] = {}
         self.ticket_cache: Dict[str, Dict[str, Any]] = {}
         self.jira_client: JIRA = self._init_jira()
 
+    def _get_slack_token(self) -> str:
+        """Get Slack token with user token preference (feature toggle)
+
+        Checks for SLACK_USER_TOKEN first (OAuth user token), falls back to
+        SLACK_API_TOKEN (bot token) for backward compatibility.
+
+        Returns:
+            str: Slack API token (xoxp- for user, xoxb- for bot)
+        """
+        user_token = os.getenv("SLACK_USER_TOKEN")
+        bot_token = os.getenv("SLACK_API_TOKEN")
+
+        if user_token:
+            token_type = self._detect_token_type(user_token)
+            self.logger.info(
+                f"Using USER token ({token_type}) - OAuth mode enabled"
+            )
+            return user_token
+        elif bot_token:
+            token_type = self._detect_token_type(bot_token)
+            self.logger.info(f"Using BOT token ({token_type}) - Classic bot mode")
+            return bot_token
+        else:
+            raise ValueError(
+                "No Slack token found. Set SLACK_USER_TOKEN or SLACK_API_TOKEN"
+            )
+
+    def _detect_token_type(self, token: str) -> str:
+        """Detect Slack token type from prefix
+
+        Args:
+            token: Slack API token
+
+        Returns:
+            str: Token type identifier
+        """
+        if token.startswith("xoxp-"):
+            return "xoxp-"
+        elif token.startswith("xoxb-"):
+            return "xoxb-"
+        elif token.startswith("xoxa-"):
+            return "xoxa-"
+        else:
+            return "unknown"
+
     def _validate_env(self) -> None:
         """Validate required environment variables exist"""
         self.logger.debug("Validating environment variables")
-        required_vars = ["SLACK_API_TOKEN", "JIRA_API_TOKEN", "JIRA_USER_NAME"]
+        # Slack token now optional (checked in _get_slack_token)
+        required_vars = ["JIRA_API_TOKEN", "JIRA_USER_NAME"]
         for var in required_vars:
             assert (
                 var in os.environ
