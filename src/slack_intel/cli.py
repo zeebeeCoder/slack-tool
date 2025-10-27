@@ -21,6 +21,7 @@ from .thread_reconstructor import ThreadReconstructor
 from .message_view_formatter import MessageViewFormatter, ViewContext
 from .sql_view_composer import SqlViewComposer
 from .enriched_message_view_formatter import EnrichedMessageViewFormatter
+from .s3_sync import create_syncer
 
 console = Console()
 
@@ -724,6 +725,173 @@ def view(channel, date, start_date, end_date, cache_path, output):
 
     except Exception as e:
         console.print(f"[red]Error generating view: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+
+@cli.command()
+@click.option('--bucket', '-b', help='S3 bucket name (overrides config file)')
+@click.option('--prefix', '-p', help='S3 prefix/folder (overrides config file)')
+@click.option('--cache-path', default='cache/raw', help='Local cache directory (default: cache/raw)')
+@click.option('--region', help='AWS region (overrides config file)')
+@click.option('--profile', help='AWS profile name (overrides config file, supports SSO)')
+@click.option('--delete', is_flag=True, help='Delete S3 files not present locally')
+@click.option('--dry-run', is_flag=True, help='Show what would be synced without uploading')
+def sync(bucket, prefix, cache_path, region, profile, delete, dry_run):
+    """Sync cached Parquet files to S3
+
+    Uses incremental sync - only uploads new or modified files.
+    Preserves directory structure including Hive-style partitions.
+
+    Examples:
+        \b
+        # Sync using config file (.slack-intel.yaml)
+        slack-intel sync
+
+        \b
+        # Override config with CLI options
+        slack-intel sync --bucket my-slack-data --profile AdministratorAccess-276780518338
+
+        \b
+        # Sync with prefix
+        slack-intel sync --prefix production/
+
+        \b
+        # Dry run to see what would be synced
+        slack-intel sync --dry-run
+
+        \b
+        # Sync with deletion of remote files not present locally
+        slack-intel sync --delete
+
+        \b
+        # Use specific AWS profile and region (overrides config)
+        slack-intel sync --profile prod --region us-west-2
+    """
+    # Load config
+    config_channels = load_config()
+
+    # Extract S3 storage config from loaded config
+    storage_config = {}
+    config_paths = [
+        Path(".slack-intel.yaml"),
+        Path.home() / ".slack-intel.yaml",
+    ]
+
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    config = yaml.safe_load(f)
+                    if config and "storage" in config:
+                        storage_config = config["storage"]
+                        console.print(f"[dim]Loaded S3 config from {config_path}[/dim]")
+                        break
+            except Exception as e:
+                console.print(f"[yellow]Warning: Failed to load {config_path}: {e}[/yellow]")
+                continue
+
+    # Merge config with CLI options (CLI options take precedence)
+    final_bucket = bucket or storage_config.get("bucket")
+    final_prefix = prefix if prefix is not None else storage_config.get("prefix", "")
+    final_region = region or storage_config.get("region")
+    final_profile = profile or storage_config.get("profile")
+
+    # Validate required bucket
+    if not final_bucket:
+        console.print("[red]Error: S3 bucket not specified[/red]")
+        console.print("[yellow]Either:[/yellow]")
+        console.print("  - Specify --bucket on command line")
+        console.print("  - Configure 'storage.bucket' in .slack-intel.yaml")
+        console.print("\n[dim]Example .slack-intel.yaml:[/dim]")
+        console.print("[dim]storage:")
+        console.print("  bucket: my-slack-data")
+        console.print("  prefix: production/")
+        console.print("  profile: AdministratorAccess-276780518338[/dim]")
+        return
+
+    cache_dir = Path(cache_path)
+
+    if not cache_dir.exists():
+        console.print(f"[red]Error: Cache directory not found: {cache_path}[/red]")
+        console.print("[yellow]Run 'slack-intel cache' first to create cache.[/yellow]")
+        return
+
+    # Display sync info
+    console.print(Panel.fit(
+        f"[bold blue]☁️  S3 Sync[/bold blue]\n"
+        f"Source: {cache_path}\n"
+        f"Destination: s3://{final_bucket}/{final_prefix}\n"
+        f"Profile: {final_profile or '[dim]default[/dim]'}\n"
+        f"Region: {final_region or '[dim]default[/dim]'}\n"
+        f"Delete remote: {'[red]yes[/red]' if delete else '[dim]no[/dim]'}\n"
+        f"Mode: {'[yellow]DRY RUN[/yellow]' if dry_run else '[green]live[/green]'}",
+        border_style="blue"
+    ))
+
+    try:
+        # Create S3 syncer
+        console.print("[dim]Initializing S3 syncer...[/dim]")
+        syncer = create_syncer(
+            bucket=final_bucket,
+            prefix=final_prefix,
+            region=final_region,
+            aws_profile=final_profile
+        )
+
+        # Perform sync
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            task = progress.add_task(
+                f"[cyan]{'Checking' if dry_run else 'Syncing'} files...",
+                total=None
+            )
+
+            result = syncer.sync(
+                local_path=cache_dir,
+                delete=delete,
+                dry_run=dry_run,
+                include_patterns=["**/*.parquet"]
+            )
+
+            progress.update(task, completed=True)
+
+        # Display results
+        if dry_run:
+            console.print("\n[yellow]DRY RUN - No files were actually uploaded[/yellow]")
+        else:
+            console.print()
+            table = Table(title="Sync Results", show_header=True, header_style="bold cyan")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", justify="right")
+
+            table.add_row("Files Uploaded", str(result.files_uploaded))
+            table.add_row("Files Skipped", str(result.files_skipped))
+            if delete:
+                table.add_row("Files Deleted", str(result.files_deleted))
+            table.add_row("Data Transferred", f"{result.bytes_transferred / (1024*1024):.2f} MB")
+
+            console.print(table)
+
+            if result.success:
+                console.print(f"\n[green]✓ Sync completed successfully[/green]")
+            else:
+                console.print(f"\n[yellow]⚠ Sync completed with warnings[/yellow]")
+
+    except ValueError as e:
+        console.print(f"[red]Configuration error: {e}[/red]")
+        console.print("\n[yellow]Tips:[/yellow]")
+        console.print("  - Check that the bucket name is correct")
+        console.print("  - For AWS SSO: Run 'aws sso login --profile YOUR_PROFILE'")
+        console.print("  - For standard AWS: Run 'aws configure'")
+        console.print("  - Verify you have permissions to access the bucket")
+        if final_profile:
+            console.print(f"  - Test profile with: aws --profile {final_profile} s3 ls s3://{final_bucket}/")
+    except Exception as e:
+        console.print(f"[red]Sync failed: {e}[/red]")
         import traceback
         console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
