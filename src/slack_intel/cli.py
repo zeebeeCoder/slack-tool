@@ -886,6 +886,8 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
 @cli.command()
 @click.option('--channel', '-c', multiple=True, help='Channel name(s) to process')
 @click.option('--merge-channels', is_flag=True, help='Merge all channels from manifest')
+@click.option('--user', '-u', help='Process user timeline across channels')
+@click.option('--include-mentions', is_flag=True, help='Include threads where user was mentioned')
 @click.option('--bucket-by', type=click.Choice(['hour', 'day', 'none']), default='hour',
               help='Time bucketing for multi-channel view (default: hour)')
 @click.option('--date', '-d', help='Date to process (YYYY-MM-DD, default: last 7 days)')
@@ -900,7 +902,7 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
 @click.option('--reasoning-effort', type=click.Choice(['low', 'medium', 'high']), default='medium',
               help='Reasoning effort for GPT-5 (default: medium)')
 @click.option('--format', type=click.Choice(['text', 'json']), default='text', help='Output format (default: text)')
-def process(channel, merge_channels, bucket_by, date, start_date, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, format):
+def process(channel, merge_channels, user, include_mentions, bucket_by, date, start_date, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, format):
     """Process Slack messages with LLM to generate summaries and insights
 
     This command uses OpenAI's API to analyze Slack conversations. It can either:
@@ -955,20 +957,27 @@ def process(channel, merge_channels, bucket_by, date, start_date, end_date, cach
             message_content = input_path.read_text()
             channel_name = "Input File"
             date_range_str = "unknown"
+            view_type = "single_channel"  # Default for input files
+            normalized_channels = []
         else:
             # Generate view from cache (same logic as view command)
-            if not channel and not merge_channels:
-                console.print("[red]Error: Must specify --channel, --merge-channels, or --input[/red]")
+            if not channel and not merge_channels and not user:
+                console.print("[red]Error: Must specify --channel, --merge-channels, --user, or --input[/red]")
                 console.print("[yellow]Examples:[/yellow]")
                 console.print("  slack-intel process --channel backend-devs")
                 console.print("  slack-intel process --merge-channels")
+                console.print("  slack-intel process --user zeebee")
                 console.print("  slack-intel process --input view.txt")
                 return
 
             # Determine channels to view
             channels_to_view = []
 
-            if merge_channels:
+            if user:
+                # User timeline processing - will use different logic below
+                console.print(f"[dim]Processing timeline for user: {user}[/dim]")
+                channels_to_view = []  # Will be populated from user data
+            elif merge_channels:
                 config_channels = load_config()
                 channels_to_view = [ch["name"] for ch in config_channels]
                 console.print(f"[dim]Processing {len(channels_to_view)} channels from manifest[/dim]")
@@ -1003,11 +1012,64 @@ def process(channel, merge_channels, bucket_by, date, start_date, end_date, cach
                 end_date = end_date_dt.strftime("%Y-%m-%d")
                 date_range_str = f"{start_date} to {end_date}"
 
-            # Read messages
-            console.print(f"[dim]Reading messages ({date_range_str})...[/dim]")
+            # Read messages based on view type
+            if user:
+                # User timeline mode - fetch user's messages across channels
+                # Resolve username to user_id and get actual user_name
+                user_id = user_reader.find_user_by_name(user)
+                if not user_id:
+                    console.print(f"[yellow]Could not find user '{user}' in cache[/yellow]")
+                    console.print("[dim]User lookup uses cached data - try a different name or check available users[/dim]")
+                    return
 
-            if len(normalized_channels) == 1:
+                # Get the actual user_name from cache
+                user_data = user_reader.get_user(user_id)
+                actual_user_name = user_data.get('user_name') if user_data else user
+                user_display_name = user_data.get('user_real_name', actual_user_name) if user_data else user
+
+                console.print(f"[dim]Reading messages from {user_display_name} (@{actual_user_name}) ({date_range_str})...[/dim]")
+
+                # Get all channels from config if not specified
+                if not channels_to_view:
+                    config_channels = load_config()
+                    channels_to_view = [ch["name"] for ch in config_channels]
+
+                # Normalize channel names (try with prefix)
+                channels_with_data = []
+                for ch in channels_to_view:
+                    test_messages = composer.read_messages_enriched_range(ch, start_date, end_date)
+                    if test_messages:
+                        channels_with_data.append(ch)
+                    elif not ch.startswith("channel_"):
+                        prefixed = f"channel_{ch}"
+                        test_messages = composer.read_messages_enriched_range(prefixed, start_date, end_date)
+                        if test_messages:
+                            channels_with_data.append(prefixed)
+
+                if not channels_with_data:
+                    console.print(f"[yellow]No channel data found for {date_range_str}[/yellow]")
+                    return
+
+                # Fetch user timeline with SQL-level filtering
+                flat_messages = composer.read_user_timeline_enriched(
+                    user_name=actual_user_name,
+                    channels=channels_with_data,
+                    start_date=start_date,
+                    end_date=end_date,
+                    include_mentions=include_mentions,
+                    user_id=user_id
+                )
+                normalized_channels = channels_with_data
+                channel_name = f"{user_display_name} (@{actual_user_name})"
+
+                if not flat_messages:
+                    console.print(f"[yellow]No messages found from user '{user}' in {date_range_str}[/yellow]")
+                    return
+
+            elif len(normalized_channels) == 1:
+                # Single channel mode
                 single_channel = normalized_channels[0]
+                console.print(f"[dim]Reading messages from {single_channel} ({date_range_str})...[/dim]")
                 flat_messages = composer.read_messages_enriched_range(single_channel, start_date, end_date)
 
                 if not flat_messages and not single_channel.startswith("channel_"):
@@ -1020,7 +1082,12 @@ def process(channel, merge_channels, bucket_by, date, start_date, end_date, cach
                 if not flat_messages:
                     console.print(f"[yellow]No messages found in {single_channel} for {date_range_str}[/yellow]")
                     return
+
+                channel_name = single_channel
+
             else:
+                # Multi-channel mode
+                console.print(f"[dim]Reading messages from {len(normalized_channels)} channels ({date_range_str})...[/dim]")
                 channels_with_data = []
                 for ch in normalized_channels:
                     test_messages = composer.read_messages_enriched_range(ch, start_date, end_date)
@@ -1042,6 +1109,7 @@ def process(channel, merge_channels, bucket_by, date, start_date, end_date, cach
                     end_date
                 )
                 normalized_channels = channels_with_data
+                channel_name = "Multi-Channel"
 
             console.print(f"[green]Found {len(flat_messages)} messages[/green]")
 
@@ -1050,23 +1118,30 @@ def process(channel, merge_channels, bucket_by, date, start_date, end_date, cach
             reconstructor = ThreadReconstructor()
             structured_messages = reconstructor.reconstruct(flat_messages)
 
-            is_multi_channel = len(normalized_channels) > 1
-
-            if is_multi_channel:
+            # Determine view type for processor
+            if user:
+                view_type = "user_timeline"
+                context = ViewContext(
+                    channel_name=channel_name,
+                    date_range=date_range_str,
+                    channels=normalized_channels
+                )
+                formatter = EnrichedMessageViewFormatter(bucket_type=bucket_by)
+            elif len(normalized_channels) > 1:
+                view_type = "multi_channel"
                 context = ViewContext(
                     channel_name="Multi-Channel",
                     date_range=date_range_str,
                     channels=normalized_channels
                 )
                 formatter = EnrichedMessageViewFormatter(bucket_type=bucket_by)
-                channel_name = "Multi-Channel"
             else:
+                view_type = "single_channel"
                 context = ViewContext(
-                    channel_name=normalized_channels[0],
+                    channel_name=channel_name,
                     date_range=date_range_str
                 )
                 formatter = EnrichedMessageViewFormatter()
-                channel_name = normalized_channels[0]
 
             message_content = formatter.format(structured_messages, context, cached_users=cached_users)
 
@@ -1104,7 +1179,9 @@ def process(channel, merge_channels, bucket_by, date, start_date, end_date, cach
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
-            reasoning_effort=reasoning_effort
+            reasoning_effort=reasoning_effort,
+            view_type=view_type,
+            channels=normalized_channels
         )
 
         # Display results

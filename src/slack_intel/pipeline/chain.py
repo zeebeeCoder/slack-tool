@@ -34,20 +34,24 @@ class ChainProcessor:
         temperature: float = 0.7,
         max_tokens: int = 4000,
         stream: bool = True,
-        reasoning_effort: str = "medium"
+        reasoning_effort: str = "medium",
+        view_type: str = "single_channel",
+        channels: list = None
     ) -> AnalysisResult:
         """
         Run the complete chain-of-thought analysis on Slack messages
 
         Args:
             message_content: Formatted message content from view command
-            channel_name: Name of the Slack channel
+            channel_name: Name of the Slack channel or user
             date_range: Date range of messages
             model: OpenAI model to use (gpt-4o or gpt-5)
             temperature: Sampling temperature (not used for GPT-5)
             max_tokens: Maximum tokens in response (not used for GPT-5)
             stream: Whether to stream the response (not supported by GPT-5)
             reasoning_effort: Reasoning effort for GPT-5 (low, medium, high)
+            view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
+            channels: List of channel names (for multi-channel and user timeline views)
 
         Returns:
             Complete analysis result with summary and metrics
@@ -65,7 +69,13 @@ class ChainProcessor:
         )
 
         # Step 1: Process messages with LLM
-        self._step_1_process_messages(context, stream=stream, reasoning_effort=reasoning_effort)
+        self._step_1_process_messages(
+            context,
+            stream=stream,
+            reasoning_effort=reasoning_effort,
+            view_type=view_type,
+            channels=channels
+        )
 
         # Calculate total time
         total_time = (datetime.now() - start_time).total_seconds()
@@ -86,7 +96,9 @@ class ChainProcessor:
         self,
         context: ProcessingContext,
         stream: bool = True,
-        reasoning_effort: str = "medium"
+        reasoning_effort: str = "medium",
+        view_type: str = "single_channel",
+        channels: list = None
     ) -> None:
         """
         Step 1: Process messages with LLM to generate summary
@@ -95,6 +107,8 @@ class ChainProcessor:
             context: Processing context
             stream: Whether to stream the response
             reasoning_effort: Reasoning effort for GPT-5 (low, medium, high)
+            view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
+            channels: List of channel names (for multi-channel and user timeline views)
         """
         step_start = time.time()
 
@@ -112,7 +126,9 @@ class ChainProcessor:
                 temperature=context.temperature,
                 max_tokens=context.max_tokens,
                 stream=stream,
-                reasoning_effort=reasoning_effort
+                reasoning_effort=reasoning_effort,
+                view_type=view_type,
+                channels=channels
             ):
                 summary_chunks.append(chunk)
 

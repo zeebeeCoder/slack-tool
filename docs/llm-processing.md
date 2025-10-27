@@ -61,6 +61,29 @@ slack-intel process -c backend-devs -c user-engagement
 slack-intel process --merge-channels
 ```
 
+### Process User Timeline
+
+Analyze a specific user's activity across all channels:
+
+```bash
+# Process user timeline (last 7 days)
+slack-intel process --user shef
+
+# Include threads where user was mentioned
+slack-intel process --user shef --include-mentions
+
+# Process user timeline for specific date range
+slack-intel process --user shef --start-date 2025-10-20 --end-date 2025-10-27
+```
+
+**User timeline prompts focus on**:
+- Key contributions and areas of activity
+- Expertise and focus areas
+- Communication patterns (questions, answers, decisions)
+- Action items owned
+- Collaboration network
+- Questions and blockers
+
 ### Process Existing View File
 
 If you already have a view saved, you can process it directly:
@@ -157,6 +180,33 @@ slack-intel process \
   --output weekly-insights.txt
 ```
 
+### User Performance Review
+
+Analyze a team member's contributions across all channels:
+
+```bash
+slack-intel process \
+  --user shef \
+  --start-date 2025-10-01 \
+  --end-date 2025-10-27 \
+  --reasoning-effort high \
+  --output shef-october-review.txt
+```
+
+### Cross-Team Coordination Analysis
+
+Analyze coordination across multiple specific teams:
+
+```bash
+slack-intel process \
+  -c backend-devs \
+  -c frontend-team \
+  -c product-design \
+  --start-date 2025-10-20 \
+  --end-date 2025-10-27 \
+  --output cross-team-coordination.txt
+```
+
 ### Quick Analysis from Saved View
 
 ```bash
@@ -181,9 +231,13 @@ Future steps could include:
 - Topic clustering
 - Trend analysis
 
-## Prompt Template
+## Prompt Templates
 
-The default prompt asks the LLM to analyze messages and provide:
+The tool uses context-aware prompts that adapt to the type of view being processed:
+
+### Single Channel Prompt
+
+Used when processing a single channel with `--channel`. Focuses on:
 
 1. Key topics and discussions
 2. Important decisions made
@@ -191,7 +245,29 @@ The default prompt asks the LLM to analyze messages and provide:
 4. Notable patterns or trends
 5. Critical issues or concerns raised
 
-You can customize the prompt by modifying `src/slack_intel/pipeline/processors.py`.
+### Multi-Channel Prompt
+
+Used when processing multiple channels with `--merge-channels` or `-c channel1 -c channel2`. Focuses on:
+
+1. **Common Themes**: Topics appearing across multiple channels
+2. **Cross-Functional Coordination**: How different teams interact
+3. **Channel-Specific Highlights**: Key developments unique to each channel
+4. **Organization-Wide Trends**: Patterns affecting multiple teams
+5. **Critical Dependencies**: Blockers or decisions impacting multiple channels
+6. **Emerging Issues**: New concerns or opportunities
+
+### User Timeline Prompt
+
+Used when processing a user's timeline with `--user`. Focuses on:
+
+1. **Key Contributions**: Main topics and areas where the user is active
+2. **Expertise & Focus Areas**: Technical domains or business areas they engage with
+3. **Communication Patterns**: How they interact (questions, answers, decisions, collaboration)
+4. **Action Items Owned**: Tasks and responsibilities they've taken on
+5. **Collaboration Network**: Who they work with most frequently
+6. **Questions & Blockers**: Areas where they need input or are blocked
+
+You can customize these prompts by modifying `src/slack_intel/pipeline/processors.py`.
 
 ## Cost Considerations
 
