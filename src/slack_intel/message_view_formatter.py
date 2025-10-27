@@ -317,13 +317,13 @@ class MessageViewFormatter:
         return re.sub(pattern, replace_mention, text)
 
     def _format_timestamp(self, timestamp_str: str) -> str:
-        """Format ISO timestamp to readable format
+        """Format ISO timestamp to readable format with relative time
 
         Args:
             timestamp_str: ISO 8601 timestamp string (e.g., "2023-10-20T10:00:00Z")
 
         Returns:
-            Formatted timestamp (e.g., "2023-10-20 10:00")
+            Formatted timestamp with relative time (e.g., "2023-10-20 10:00 (2 days ago)")
         """
         if not timestamp_str:
             return "unknown time"
@@ -332,7 +332,49 @@ class MessageViewFormatter:
             # Handle both with and without Z suffix
             ts = timestamp_str.replace("Z", "+00:00")
             dt = datetime.fromisoformat(ts)
-            return dt.strftime("%Y-%m-%d %H:%M")
+
+            # Format absolute time
+            absolute_time = dt.strftime("%Y-%m-%d %H:%M")
+
+            # Calculate relative time
+            relative_time = self._get_relative_time(dt)
+
+            return f"{absolute_time} ({relative_time})"
         except (ValueError, AttributeError):
             # Fallback for malformed timestamps
             return timestamp_str[:16] if len(timestamp_str) >= 16 else timestamp_str
+
+    def _get_relative_time(self, dt: datetime) -> str:
+        """Get human-readable relative time from datetime
+
+        Args:
+            dt: Datetime object to calculate relative time from
+
+        Returns:
+            Relative time string (e.g., "2 mins ago", "3 hours ago", "5 days ago")
+        """
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        diff = now - dt
+
+        seconds = diff.total_seconds()
+
+        if seconds < 60:
+            return "just now"
+        elif seconds < 3600:  # Less than 1 hour
+            mins = int(seconds / 60)
+            return f"{mins} min{'s' if mins != 1 else ''} ago"
+        elif seconds < 86400:  # Less than 1 day
+            hours = int(seconds / 3600)
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        elif seconds < 604800:  # Less than 1 week
+            days = int(seconds / 86400)
+            return f"{days} day{'s' if days != 1 else ''} ago"
+        elif seconds < 2592000:  # Less than 30 days
+            weeks = int(seconds / 604800)
+            return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+        elif seconds < 31536000:  # Less than 1 year
+            months = int(seconds / 2592000)
+            return f"{months} month{'s' if months != 1 else ''} ago"
+        else:
+            years = int(seconds / 31536000)
+            return f"{years} year{'s' if years != 1 else ''} ago"

@@ -686,12 +686,22 @@ def view(channel, date, start_date, end_date, cache_path, output):
             flat_messages, actual_channel = try_read_channel(channel, date)
             channel = actual_channel  # Update channel name for display
         else:
-            # Default to today
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            date_range_str = date_str
-            console.print(f"[dim]Reading enriched messages from {channel} ({date_str})...[/dim]")
-            flat_messages, actual_channel = try_read_channel(channel, date_str)
-            channel = actual_channel  # Update channel name for display
+            # Default to last 7 days
+            from datetime import timedelta
+            end_date_dt = datetime.now()
+            start_date_dt = end_date_dt - timedelta(days=7)
+            start_date = start_date_dt.strftime("%Y-%m-%d")
+            end_date = end_date_dt.strftime("%Y-%m-%d")
+            date_range_str = f"{start_date} to {end_date}"
+            console.print(f"[dim]Reading enriched messages from {channel} ({date_range_str})...[/dim]")
+            # Try exact channel name first
+            flat_messages = composer.read_messages_enriched_range(channel, start_date, end_date)
+            # If no messages and channel doesn't start with "channel_", try with prefix
+            if not flat_messages and not channel.startswith("channel_"):
+                prefixed_name = f"channel_{channel}"
+                flat_messages = composer.read_messages_enriched_range(prefixed_name, start_date, end_date)
+                if flat_messages:
+                    channel = prefixed_name
 
         if not flat_messages:
             console.print(f"[yellow]No messages found in {channel} for {date_range_str}[/yellow]")
