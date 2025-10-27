@@ -615,29 +615,78 @@ def stats(cache_path, format):
 
 
 @cli.command()
-@click.option('--channel', '-c', required=True, help='Channel name to view')
+@click.option('--channel', '-c', multiple=True, help='Channel name(s) to view')
+@click.option('--merge-channels', is_flag=True, help='Merge all channels from manifest')
+@click.option('--user', '-u', help='Filter messages by username (e.g., zeebee)')
+@click.option('--include-mentions', is_flag=True, help='Include threads where user was mentioned')
+@click.option('--bucket-by', type=click.Choice(['hour', 'day', 'none']), default='hour',
+              help='Time bucketing for multi-channel view (default: hour)')
 @click.option('--date', '-d', help='Date to view (YYYY-MM-DD, default: today)')
 @click.option('--start-date', help='Start date for range (YYYY-MM-DD)')
 @click.option('--end-date', help='End date for range (YYYY-MM-DD)')
 @click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
 @click.option('--output', '-o', help='Output file (default: print to console)')
-def view(channel, date, start_date, end_date, cache_path, output):
+def view(channel, merge_channels, user, include_mentions, bucket_by, date, start_date, end_date, cache_path, output):
     """Generate formatted message view from Parquet cache
 
     Examples:
         \\b
-        # View single day
+        # View single channel
         slack-intel view --channel backend-devs --date 2025-10-20
 
         \\b
-        # View date range
-        slack-intel view -c engineering --start-date 2025-10-18 --end-date 2025-10-20
+        # View multiple channels merged with time buckets
+        slack-intel view -c backend-devs -c user-engagement --bucket-by hour
+
+        \\b
+        # Merge ALL channels from manifest
+        slack-intel view --merge-channels --start-date 2025-10-18 --end-date 2025-10-20
+
+        \\b
+        # User timeline across all channels
+        slack-intel view --user zeebee
+
+        \\b
+        # User timeline in specific channels with mentions
+        slack-intel view --user zeebee -c backend-devs --include-mentions
 
         \\b
         # Save to file
         slack-intel view -c general --date 2025-10-20 -o output.txt
     """
     try:
+        # Determine channels to view
+        channels_to_view = []
+        is_user_timeline = bool(user)
+
+        if is_user_timeline:
+            # User timeline mode
+            if channel:
+                # Use specified channels for user timeline
+                channels_to_view = list(channel)
+                console.print(f"[dim]User timeline in {len(channels_to_view)} channel(s)[/dim]")
+            else:
+                # Default: search all channels from manifest
+                config_channels = load_config()
+                channels_to_view = [ch["name"] for ch in config_channels]
+                console.print(f"[dim]User timeline across {len(channels_to_view)} channels[/dim]")
+        elif merge_channels:
+            # Load all channels from manifest
+            config_channels = load_config()
+            channels_to_view = [ch["name"] for ch in config_channels]
+            console.print(f"[dim]Merging {len(channels_to_view)} channels from manifest[/dim]")
+        elif channel:
+            # Use specified channels
+            channels_to_view = list(channel)
+            console.print(f"[dim]Viewing {len(channels_to_view)} channel(s)[/dim]")
+        else:
+            console.print("[red]Error: Must specify --channel, --merge-channels, or --user[/red]")
+            console.print("[yellow]Examples:[/yellow]")
+            console.print("  slack-intel view --channel backend-devs")
+            console.print("  slack-intel view --merge-channels")
+            console.print("  slack-intel view --user zeebee")
+            return
+
         # Initialize SQL view composer and user reader
         composer = SqlViewComposer(base_path=cache_path)
         user_reader = ParquetUserReader(base_path=cache_path)
@@ -650,41 +699,25 @@ def view(channel, date, start_date, end_date, cache_path, output):
         else:
             console.print("[dim]No user cache found (mentions may not be resolved)[/dim]")
 
-        # Handle channel naming: try exact name first, then with "channel_" prefix
-        # This handles both config-based channels (named) and CLI channel IDs
-        def try_read_channel(channel_name: str, date: str):
-            """Try reading channel, handling both named channels and raw IDs"""
-            # Try exact name first
-            messages = composer.read_messages_enriched(channel_name, date)
-            if messages:
-                return messages, channel_name
-
-            # If no messages and channel name doesn't start with "channel_", try with prefix
+        # Normalize channel names (handle "channel_" prefix)
+        def normalize_channel_name(channel_name: str) -> str:
+            """Try both exact name and with 'channel_' prefix"""
+            # For multi-channel, we'll try the exact name first
+            # The composer will handle fallback internally
             if not channel_name.startswith("channel_"):
-                prefixed_name = f"channel_{channel_name}"
-                messages = composer.read_messages_enriched(prefixed_name, date)
-                if messages:
-                    return messages, prefixed_name
+                # Check if data exists for exact name or prefixed name
+                return channel_name
+            return channel_name
 
-            return [], channel_name
+        normalized_channels = [normalize_channel_name(ch) for ch in channels_to_view]
 
         # Determine date range
         if start_date and end_date:
             date_range_str = f"{start_date} to {end_date}"
-            console.print(f"[dim]Reading enriched messages from {channel} ({date_range_str})...[/dim]")
-            # Try exact channel name first
-            flat_messages = composer.read_messages_enriched_range(channel, start_date, end_date)
-            # If no messages and channel doesn't start with "channel_", try with prefix
-            if not flat_messages and not channel.startswith("channel_"):
-                prefixed_name = f"channel_{channel}"
-                flat_messages = composer.read_messages_enriched_range(prefixed_name, start_date, end_date)
-                if flat_messages:
-                    channel = prefixed_name
         elif date:
             date_range_str = date
-            console.print(f"[dim]Reading enriched messages from {channel} ({date})...[/dim]")
-            flat_messages, actual_channel = try_read_channel(channel, date)
-            channel = actual_channel  # Update channel name for display
+            start_date = date
+            end_date = date
         else:
             # Default to last 7 days
             from datetime import timedelta
@@ -693,20 +726,100 @@ def view(channel, date, start_date, end_date, cache_path, output):
             start_date = start_date_dt.strftime("%Y-%m-%d")
             end_date = end_date_dt.strftime("%Y-%m-%d")
             date_range_str = f"{start_date} to {end_date}"
-            console.print(f"[dim]Reading enriched messages from {channel} ({date_range_str})...[/dim]")
-            # Try exact channel name first
-            flat_messages = composer.read_messages_enriched_range(channel, start_date, end_date)
-            # If no messages and channel doesn't start with "channel_", try with prefix
-            if not flat_messages and not channel.startswith("channel_"):
-                prefixed_name = f"channel_{channel}"
+
+        # Read messages based on user timeline vs regular view
+        if is_user_timeline:
+            # User timeline mode - fetch user's messages across channels
+            console.print(f"[dim]Reading messages from user '{user}' ({date_range_str})...[/dim]")
+
+            # Resolve username to user_id
+            user_id = user_reader.find_user_by_name(user)
+            if not user_id:
+                console.print(f"[yellow]Warning: Could not find user '{user}' in cache[/yellow]")
+                console.print("[dim]User lookup uses cached data - the user may not have posted recently[/dim]")
+
+            # Normalize channel names (try with prefix)
+            channels_with_data = []
+            for ch in normalized_channels:
+                # Try exact name first
+                test_messages = composer.read_messages_enriched_range(ch, start_date, end_date)
+                if test_messages:
+                    channels_with_data.append(ch)
+                elif not ch.startswith("channel_"):
+                    # Try with prefix
+                    prefixed = f"channel_{ch}"
+                    test_messages = composer.read_messages_enriched_range(prefixed, start_date, end_date)
+                    if test_messages:
+                        channels_with_data.append(prefixed)
+
+            if not channels_with_data:
+                console.print(f"[yellow]No channel data found for {date_range_str}[/yellow]")
+                return
+
+            # Fetch user timeline with SQL-level filtering
+            flat_messages = composer.read_user_timeline_enriched(
+                user_name=user,
+                channels=channels_with_data,
+                start_date=start_date,
+                end_date=end_date,
+                include_mentions=include_mentions,
+                user_id=user_id
+            )
+            normalized_channels = channels_with_data
+
+            if not flat_messages:
+                console.print(f"[yellow]No messages found from user '{user}' in {date_range_str}[/yellow]")
+                console.print("[dim]Try a different date range or verify the username is correct[/dim]")
+                return
+
+        elif len(normalized_channels) == 1:
+            # Single channel - use original logic
+            single_channel = normalized_channels[0]
+            console.print(f"[dim]Reading enriched messages from {single_channel} ({date_range_str})...[/dim]")
+            flat_messages = composer.read_messages_enriched_range(single_channel, start_date, end_date)
+
+            # Try with channel_ prefix if no messages found
+            if not flat_messages and not single_channel.startswith("channel_"):
+                prefixed_name = f"channel_{single_channel}"
                 flat_messages = composer.read_messages_enriched_range(prefixed_name, start_date, end_date)
                 if flat_messages:
-                    channel = prefixed_name
+                    single_channel = prefixed_name
+                    normalized_channels = [prefixed_name]
 
-        if not flat_messages:
-            console.print(f"[yellow]No messages found in {channel} for {date_range_str}[/yellow]")
-            console.print("[dim]Try a different date range or check 'slack-intel stats' to see available data.[/dim]")
-            return
+            if not flat_messages:
+                console.print(f"[yellow]No messages found in {single_channel} for {date_range_str}[/yellow]")
+                console.print("[dim]Try a different date range or check 'slack-intel stats' to see available data.[/dim]")
+                return
+        else:
+            # Multi-channel - merge all channels
+            console.print(f"[dim]Reading enriched messages from {len(normalized_channels)} channels ({date_range_str})...[/dim]")
+
+            # Try both exact names and with prefix
+            channels_with_data = []
+            for ch in normalized_channels:
+                # Try exact name first
+                test_messages = composer.read_messages_enriched_range(ch, start_date, end_date)
+                if test_messages:
+                    channels_with_data.append(ch)
+                elif not ch.startswith("channel_"):
+                    # Try with prefix
+                    prefixed = f"channel_{ch}"
+                    test_messages = composer.read_messages_enriched_range(prefixed, start_date, end_date)
+                    if test_messages:
+                        channels_with_data.append(prefixed)
+
+            if not channels_with_data:
+                console.print(f"[yellow]No messages found in any channel for {date_range_str}[/yellow]")
+                console.print("[dim]Try a different date range or check 'slack-intel stats' to see available data.[/dim]")
+                return
+
+            console.print(f"[dim]Found data in {len(channels_with_data)} channel(s)[/dim]")
+            flat_messages = composer.read_multi_channel_messages_enriched(
+                channels_with_data,
+                start_date,
+                end_date
+            )
+            normalized_channels = channels_with_data
 
         console.print(f"[green]Found {len(flat_messages)} messages[/green]")
 
@@ -717,11 +830,36 @@ def view(channel, date, start_date, end_date, cache_path, output):
 
         # Format view with JIRA enrichment
         console.print("[dim]Formatting enriched view...[/dim]")
-        context = ViewContext(
-            channel_name=channel,
-            date_range=date_range_str
-        )
-        formatter = EnrichedMessageViewFormatter()
+
+        # Determine view type and formatter
+        is_multi_channel = len(normalized_channels) > 1
+
+        if is_user_timeline:
+            # User timeline - no bucketing, show channel names
+            user_data = cached_users.get(user_id) if user_id else None
+            display_name = user_data.get('user_real_name') if user_data else user
+
+            context = ViewContext(
+                channel_name=f"User: {display_name or user}",
+                date_range=date_range_str,
+                channels=normalized_channels  # Multi-channel for showing channel names
+            )
+            # No bucketing for user timeline
+            formatter = EnrichedMessageViewFormatter(bucket_type=None)
+        elif is_multi_channel:
+            context = ViewContext(
+                channel_name="Multi-Channel",
+                date_range=date_range_str,
+                channels=normalized_channels
+            )
+            formatter = EnrichedMessageViewFormatter(bucket_type=bucket_by)
+        else:
+            context = ViewContext(
+                channel_name=normalized_channels[0],
+                date_range=date_range_str
+            )
+            formatter = EnrichedMessageViewFormatter()
+
         view_output = formatter.format(structured_messages, context, cached_users=cached_users)
 
         # Output
@@ -735,6 +873,289 @@ def view(channel, date, start_date, end_date, cache_path, output):
 
     except Exception as e:
         console.print(f"[red]Error generating view: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+
+@cli.command()
+@click.option('--channel', '-c', multiple=True, help='Channel name(s) to process')
+@click.option('--merge-channels', is_flag=True, help='Merge all channels from manifest')
+@click.option('--bucket-by', type=click.Choice(['hour', 'day', 'none']), default='hour',
+              help='Time bucketing for multi-channel view (default: hour)')
+@click.option('--date', '-d', help='Date to process (YYYY-MM-DD, default: last 7 days)')
+@click.option('--start-date', help='Start date for range (YYYY-MM-DD)')
+@click.option('--end-date', help='End date for range (YYYY-MM-DD)')
+@click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
+@click.option('--input', '-i', help='Input file with view output (skip view generation)')
+@click.option('--output', '-o', help='Output file for summary (default: print to console)')
+@click.option('--model', default='gpt-5', help='OpenAI model (default: gpt-5)')
+@click.option('--temperature', default=0.7, type=float, help='Sampling temperature (default: 0.7, not used for GPT-5)')
+@click.option('--max-tokens', default=4000, type=int, help='Maximum tokens in response (default: 4000, not used for GPT-5)')
+@click.option('--reasoning-effort', type=click.Choice(['low', 'medium', 'high']), default='medium',
+              help='Reasoning effort for GPT-5 (default: medium)')
+@click.option('--format', type=click.Choice(['text', 'json']), default='text', help='Output format (default: text)')
+def process(channel, merge_channels, bucket_by, date, start_date, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, format):
+    """Process Slack messages with LLM to generate summaries and insights
+
+    This command uses OpenAI's API to analyze Slack conversations. It can either:
+    1. Generate a view from cache and process it (specify --channel)
+    2. Process an existing view file (specify --input)
+
+    Examples:
+        \\b
+        # Process single channel
+        slack-intel process --channel backend-devs --date 2025-10-20
+
+        \\b
+        # Process with GPT-5
+        slack-intel process -c backend-devs --model gpt-5 --reasoning-effort high
+
+        \\b
+        # Process existing view file
+        slack-intel process --input view-output.txt --output summary.txt
+
+        \\b
+        # Process last 7 days with JSON output
+        slack-intel process --merge-channels --format json -o insights.json
+
+        \\b
+        # Use custom parameters
+        slack-intel process -c general --temperature 0.5 --max-tokens 2000
+    """
+    import os
+    from .pipeline import ChainProcessor
+
+    # Check for OpenAI API key
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    if not openai_api_key:
+        console.print("[red]Error: OPENAI_API_KEY environment variable not set[/red]")
+        console.print("[yellow]Please set your OpenAI API key:[/yellow]")
+        console.print("  export OPENAI_API_KEY='your-api-key-here'")
+        return
+
+    try:
+        # Initialize processor
+        processor = ChainProcessor(openai_api_key)
+
+        # Determine message content and metadata
+        if input:
+            # Read from input file
+            input_path = Path(input)
+            if not input_path.exists():
+                console.print(f"[red]Error: Input file not found: {input}[/red]")
+                return
+
+            console.print(f"[dim]Reading view from {input}...[/dim]")
+            message_content = input_path.read_text()
+            channel_name = "Input File"
+            date_range_str = "unknown"
+        else:
+            # Generate view from cache (same logic as view command)
+            if not channel and not merge_channels:
+                console.print("[red]Error: Must specify --channel, --merge-channels, or --input[/red]")
+                console.print("[yellow]Examples:[/yellow]")
+                console.print("  slack-intel process --channel backend-devs")
+                console.print("  slack-intel process --merge-channels")
+                console.print("  slack-intel process --input view.txt")
+                return
+
+            # Determine channels to view
+            channels_to_view = []
+
+            if merge_channels:
+                config_channels = load_config()
+                channels_to_view = [ch["name"] for ch in config_channels]
+                console.print(f"[dim]Processing {len(channels_to_view)} channels from manifest[/dim]")
+            elif channel:
+                channels_to_view = list(channel)
+                console.print(f"[dim]Processing {len(channels_to_view)} channel(s)[/dim]")
+
+            # Initialize SQL view composer and user reader
+            composer = SqlViewComposer(base_path=cache_path)
+            user_reader = ParquetUserReader(base_path=cache_path)
+
+            # Load cached users
+            console.print("[dim]Loading user cache...[/dim]")
+            cached_users = user_reader.read_users()
+
+            # Normalize channel names
+            normalized_channels = channels_to_view
+
+            # Determine date range
+            if start_date and end_date:
+                date_range_str = f"{start_date} to {end_date}"
+            elif date:
+                date_range_str = date
+                start_date = date
+                end_date = date
+            else:
+                # Default to last 7 days
+                from datetime import timedelta
+                end_date_dt = datetime.now()
+                start_date_dt = end_date_dt - timedelta(days=7)
+                start_date = start_date_dt.strftime("%Y-%m-%d")
+                end_date = end_date_dt.strftime("%Y-%m-%d")
+                date_range_str = f"{start_date} to {end_date}"
+
+            # Read messages
+            console.print(f"[dim]Reading messages ({date_range_str})...[/dim]")
+
+            if len(normalized_channels) == 1:
+                single_channel = normalized_channels[0]
+                flat_messages = composer.read_messages_enriched_range(single_channel, start_date, end_date)
+
+                if not flat_messages and not single_channel.startswith("channel_"):
+                    prefixed_name = f"channel_{single_channel}"
+                    flat_messages = composer.read_messages_enriched_range(prefixed_name, start_date, end_date)
+                    if flat_messages:
+                        single_channel = prefixed_name
+                        normalized_channels = [prefixed_name]
+
+                if not flat_messages:
+                    console.print(f"[yellow]No messages found in {single_channel} for {date_range_str}[/yellow]")
+                    return
+            else:
+                channels_with_data = []
+                for ch in normalized_channels:
+                    test_messages = composer.read_messages_enriched_range(ch, start_date, end_date)
+                    if test_messages:
+                        channels_with_data.append(ch)
+                    elif not ch.startswith("channel_"):
+                        prefixed = f"channel_{ch}"
+                        test_messages = composer.read_messages_enriched_range(prefixed, start_date, end_date)
+                        if test_messages:
+                            channels_with_data.append(prefixed)
+
+                if not channels_with_data:
+                    console.print(f"[yellow]No messages found in any channel for {date_range_str}[/yellow]")
+                    return
+
+                flat_messages = composer.read_multi_channel_messages_enriched(
+                    channels_with_data,
+                    start_date,
+                    end_date
+                )
+                normalized_channels = channels_with_data
+
+            console.print(f"[green]Found {len(flat_messages)} messages[/green]")
+
+            # Reconstruct threads and format view
+            console.print("[dim]Reconstructing threads and formatting view...[/dim]")
+            reconstructor = ThreadReconstructor()
+            structured_messages = reconstructor.reconstruct(flat_messages)
+
+            is_multi_channel = len(normalized_channels) > 1
+
+            if is_multi_channel:
+                context = ViewContext(
+                    channel_name="Multi-Channel",
+                    date_range=date_range_str,
+                    channels=normalized_channels
+                )
+                formatter = EnrichedMessageViewFormatter(bucket_type=bucket_by)
+                channel_name = "Multi-Channel"
+            else:
+                context = ViewContext(
+                    channel_name=normalized_channels[0],
+                    date_range=date_range_str
+                )
+                formatter = EnrichedMessageViewFormatter()
+                channel_name = normalized_channels[0]
+
+            message_content = formatter.format(structured_messages, context, cached_users=cached_users)
+
+        # Process with LLM
+        console.print()
+
+        # Build panel content based on model
+        if model.startswith("gpt-5") or model == "gpt-5":
+            panel_content = (
+                f"[bold blue]🤖 LLM Processing[/bold blue]\n"
+                f"Channel: {channel_name}\n"
+                f"Date Range: {date_range_str}\n"
+                f"Model: {model}\n"
+                f"Reasoning Effort: {reasoning_effort}"
+            )
+        else:
+            panel_content = (
+                f"[bold blue]🤖 LLM Processing[/bold blue]\n"
+                f"Channel: {channel_name}\n"
+                f"Date Range: {date_range_str}\n"
+                f"Model: {model}\n"
+                f"Temperature: {temperature}\n"
+                f"Max Tokens: {max_tokens}"
+            )
+
+        console.print(Panel.fit(panel_content, border_style="blue"))
+        console.print("[cyan]Analyzing messages with LLM...[/cyan]")
+
+        # Run analysis
+        result = processor.analyze_messages(
+            message_content=message_content,
+            channel_name=channel_name,
+            date_range=date_range_str,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            reasoning_effort=reasoning_effort
+        )
+
+        # Display results
+        console.print()
+        if format == 'json':
+            # JSON output
+            output_data = result.to_dict()
+            output_str = json.dumps(output_data, indent=2)
+        else:
+            # Text output
+            output_str = f"""# Slack Channel Analysis
+
+Channel: {result.channel_name}
+Date Range: {result.date_range}
+Model: {result.model_used}
+Processing Time: {result.total_processing_time:.2f}s
+
+## Summary
+
+{result.summary}
+
+---
+Generated by slack-intel on {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+        # Output
+        if output:
+            output_path = Path(output)
+            output_path.write_text(output_str)
+            console.print(f"[green]✓ Summary saved to {output}[/green]")
+        else:
+            console.print(output_str)
+
+        # Display metrics
+        console.print()
+        table = Table(title="Processing Metrics", show_header=True, header_style="bold cyan")
+        table.add_column("Step", style="cyan")
+        table.add_column("Input", style="dim")
+        table.add_column("Output", style="dim")
+        table.add_column("Time (s)", justify="right")
+        table.add_column("Status")
+
+        for step in result.processing_steps:
+            status_color = "green" if step.success else "red"
+            status_text = "✓" if step.success else "✗"
+            table.add_row(
+                step.step_name,
+                step.input_data,
+                step.output_data,
+                f"{step.processing_time:.2f}",
+                f"[{status_color}]{status_text}[/{status_color}]"
+            )
+
+        console.print(table)
+
+    except Exception as e:
+        console.print(f"[red]Error processing messages: {e}[/red]")
         import traceback
         console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
