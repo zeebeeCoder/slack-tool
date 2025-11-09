@@ -35,30 +35,31 @@ DEFAULT_CHANNELS = [
 
 
 def load_config() -> List[dict]:
-    """Load channels from config file or use defaults
+    """Load channels from config file or use defaults (legacy format)
 
     Looks for .slack-intel.yaml in current directory or home directory.
     Falls back to DEFAULT_CHANNELS if no config found.
+
+    Returns: List of {"name": str, "id": str} channel dicts
     """
-    config_paths = [
-        Path(".slack-intel.yaml"),
-        Path.home() / ".slack-intel.yaml",
-    ]
+    from .config import load_config as load_full_config, get_channel_list_for_legacy_code
 
-    for config_path in config_paths:
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    config = yaml.safe_load(f)
-                    if config and "channels" in config:
-                        console.print(f"[dim]Loaded config from {config_path}[/dim]")
-                        return config["channels"]
-            except Exception as e:
-                console.print(f"[yellow]Warning: Failed to load {config_path}: {e}[/yellow]")
-                continue
+    try:
+        full_config = load_full_config()
+        return get_channel_list_for_legacy_code(full_config)
+    except Exception as e:
+        # Fallback to defaults
+        return DEFAULT_CHANNELS
 
-    # Fallback to defaults
-    return DEFAULT_CHANNELS
+
+def load_full_config_with_fallback():
+    """Load full SlackIntelConfig with organization context
+
+    Returns: SlackIntelConfig object
+    """
+    from .config import load_config as load_full_config
+
+    return load_full_config()
 
 
 @click.group()
@@ -69,35 +70,38 @@ def cli():
 
 @cli.command()
 @click.option('--channel', '-c', multiple=True, help='Channel ID(s) to cache (overrides config)')
-@click.option('--days', '-d', default=2, help='Days to look back (default: 2)')
-@click.option('--hours', '-h', default=0, help='Hours to look back (default: 0)')
+@click.option('--days', '-d', default=7, help='Days to look back (default: 7)')
+@click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
 @click.option('--cache-path', default='cache/raw', help='Cache directory (default: cache/raw)')
-@click.option('--date', help='Partition date YYYY-MM-DD (default: today)')
 @click.option('--enrich-jira', is_flag=True, help='Fetch and cache JIRA ticket metadata')
-def cache(channel, days, hours, cache_path, date, enrich_jira):
+def cache(channel, days, end_date, cache_path, enrich_jira):
     """Fetch messages from Slack and save to Parquet cache
 
     Examples:
         \b
-        # Cache last 7 days from default channels
-        slack-intel cache --days 7
+        # Cache last 7 days from default channels (default)
+        slack-intel cache
+
+        \b
+        # Cache last 30 days
+        slack-intel cache --days 30
 
         \b
         # Cache specific channel
         slack-intel cache --channel C9876543210 --days 3
 
         \b
-        # Override multiple channels
-        slack-intel cache -c C9876543210 -c C1111111111 --days 1
+        # Cache 7 days ending on specific date
+        slack-intel cache --days 7 --end-date 2025-10-20
 
         \b
         # Cache with JIRA enrichment
         slack-intel cache --enrich-jira --days 7
     """
-    asyncio.run(_cache_async(channel, days, hours, cache_path, date, enrich_jira))
+    asyncio.run(_cache_async(channel, days, end_date, cache_path, enrich_jira))
 
 
-async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enrich_jira):
+async def _cache_async(channel_ids, days, end_date, cache_path, enrich_jira):
     """Async implementation of cache command"""
 
     # Determine channels to process
@@ -114,14 +118,14 @@ async def _cache_async(channel_ids, days, hours, cache_path, partition_date, enr
     # Initialize
     manager = SlackChannelManager()
     parquet_cache = ParquetCache(base_path=cache_path)
-    time_window = TimeWindow(days=days, hours=hours)
-    date_str = partition_date or datetime.now().strftime("%Y-%m-%d")
+    time_window = TimeWindow(days=days, hours=0)
+    date_str = end_date or datetime.now().strftime("%Y-%m-%d")
 
     # Header
     console.print(Panel.fit(
         f"[bold blue]📦 Slack to Parquet Cache[/bold blue]\n"
         f"Processing {len(channels)} channels\n"
-        f"Time window: {days} days, {hours} hours\n"
+        f"Time window: {days} days (ending {date_str})\n"
         f"Cache path: {cache_path}\n"
         f"Partitioning: By message timestamp (not cache date)\n"
         f"JIRA enrichment: {'[green]enabled[/green]' if enrich_jira else '[dim]disabled[/dim]'}",
@@ -621,30 +625,33 @@ def stats(cache_path, format):
 @click.option('--include-mentions', is_flag=True, help='Include threads where user was mentioned')
 @click.option('--bucket-by', type=click.Choice(['hour', 'day', 'none']), default='hour',
               help='Time bucketing for multi-channel view (default: hour)')
-@click.option('--date', '-d', help='Date to view (YYYY-MM-DD, default: today)')
-@click.option('--start-date', help='Start date for range (YYYY-MM-DD)')
-@click.option('--end-date', help='End date for range (YYYY-MM-DD)')
+@click.option('--days', '-d', default=7, help='Days to look back (default: 7)')
+@click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
 @click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
 @click.option('--output', '-o', help='Output file (default: print to console)')
-def view(channel, merge_channels, user, include_mentions, bucket_by, date, start_date, end_date, cache_path, output):
+def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, output):
     """Generate formatted message view from Parquet cache
 
     Examples:
         \\b
-        # View single channel
-        slack-intel view --channel backend-devs --date 2025-10-20
+        # View last 7 days from single channel (default)
+        slack-intel view --channel backend-devs
 
         \\b
-        # View multiple channels merged with time buckets
-        slack-intel view -c backend-devs -c user-engagement --bucket-by hour
+        # View last 30 days
+        slack-intel view --channel backend-devs --days 30
+
+        \\b
+        # View 7 days ending on specific date
+        slack-intel view --channel backend-devs --days 7 --end-date 2025-10-20
 
         \\b
         # Merge ALL channels from manifest
-        slack-intel view --merge-channels --start-date 2025-10-18 --end-date 2025-10-20
+        slack-intel view --merge-channels --days 14
 
         \\b
         # User timeline across all channels
-        slack-intel view --user zeebee
+        slack-intel view --user zeebee --days 30
 
         \\b
         # User timeline in specific channels with mentions
@@ -652,7 +659,7 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
 
         \\b
         # Save to file
-        slack-intel view -c general --date 2025-10-20 -o output.txt
+        slack-intel view -c general --days 1 -o output.txt
     """
     try:
         # Determine channels to view
@@ -711,20 +718,20 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
 
         normalized_channels = [normalize_channel_name(ch) for ch in channels_to_view]
 
-        # Determine date range
-        if start_date and end_date:
-            date_range_str = f"{start_date} to {end_date}"
-        elif date:
-            date_range_str = date
-            start_date = date
-            end_date = date
+        # Determine date range using unified days parameter
+        from datetime import timedelta
+        if end_date:
+            end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
         else:
-            # Default to last 7 days
-            from datetime import timedelta
             end_date_dt = datetime.now()
-            start_date_dt = end_date_dt - timedelta(days=7)
-            start_date = start_date_dt.strftime("%Y-%m-%d")
-            end_date = end_date_dt.strftime("%Y-%m-%d")
+
+        start_date_dt = end_date_dt - timedelta(days=days - 1)  # -1 because end date is inclusive
+        start_date = start_date_dt.strftime("%Y-%m-%d")
+        end_date = end_date_dt.strftime("%Y-%m-%d")
+
+        if days == 1:
+            date_range_str = end_date
+        else:
             date_range_str = f"{start_date} to {end_date}"
 
         # Read messages based on user timeline vs regular view
@@ -890,9 +897,8 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
 @click.option('--include-mentions', is_flag=True, help='Include threads where user was mentioned')
 @click.option('--bucket-by', type=click.Choice(['hour', 'day', 'none']), default='hour',
               help='Time bucketing for multi-channel view (default: hour)')
-@click.option('--date', '-d', help='Date to process (YYYY-MM-DD, default: last 7 days)')
-@click.option('--start-date', help='Start date for range (YYYY-MM-DD)')
-@click.option('--end-date', help='End date for range (YYYY-MM-DD)')
+@click.option('--days', '-d', default=7, help='Days to look back (default: 7)')
+@click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
 @click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
 @click.option('--input', '-i', help='Input file with view output (skip view generation)')
 @click.option('--output', '-o', help='Output file for summary (default: print to console)')
@@ -902,7 +908,7 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, date, start
 @click.option('--reasoning-effort', type=click.Choice(['low', 'medium', 'high']), default='medium',
               help='Reasoning effort for GPT-5 (default: medium)')
 @click.option('--format', type=click.Choice(['text', 'json']), default='text', help='Output format (default: text)')
-def process(channel, merge_channels, user, include_mentions, bucket_by, date, start_date, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, format):
+def process(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, format):
     """Process Slack messages with LLM to generate summaries and insights
 
     This command uses OpenAI's API to analyze Slack conversations. It can either:
@@ -911,8 +917,12 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, date, st
 
     Examples:
         \\b
-        # Process single channel
-        slack-intel process --channel backend-devs --date 2025-10-20
+        # Process last 7 days from single channel (default)
+        slack-intel process --channel backend-devs
+
+        \\b
+        # Process last 30 days
+        slack-intel process -c backend-devs --days 30
 
         \\b
         # Process with GPT-5
@@ -923,8 +933,8 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, date, st
         slack-intel process --input view-output.txt --output summary.txt
 
         \\b
-        # Process last 7 days with JSON output
-        slack-intel process --merge-channels --format json -o insights.json
+        # Process with JSON output
+        slack-intel process --merge-channels --days 14 --format json -o insights.json
 
         \\b
         # Use custom parameters
@@ -996,20 +1006,20 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, date, st
             # Normalize channel names
             normalized_channels = channels_to_view
 
-            # Determine date range
-            if start_date and end_date:
-                date_range_str = f"{start_date} to {end_date}"
-            elif date:
-                date_range_str = date
-                start_date = date
-                end_date = date
+            # Determine date range using unified days parameter
+            from datetime import timedelta
+            if end_date:
+                end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
             else:
-                # Default to last 7 days
-                from datetime import timedelta
                 end_date_dt = datetime.now()
-                start_date_dt = end_date_dt - timedelta(days=7)
-                start_date = start_date_dt.strftime("%Y-%m-%d")
-                end_date = end_date_dt.strftime("%Y-%m-%d")
+
+            start_date_dt = end_date_dt - timedelta(days=days - 1)  # -1 because end date is inclusive
+            start_date = start_date_dt.strftime("%Y-%m-%d")
+            end_date = end_date_dt.strftime("%Y-%m-%d")
+
+            if days == 1:
+                date_range_str = end_date
+            else:
                 date_range_str = f"{start_date} to {end_date}"
 
             # Read messages based on view type
@@ -1118,13 +1128,42 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, date, st
             reconstructor = ThreadReconstructor()
             structured_messages = reconstructor.reconstruct(flat_messages)
 
+            # Load full config for org context
+            full_config = load_full_config_with_fallback()
+
+            # Build org_context dict from config
+            org_context = {
+                "name": full_config.organization.name,
+                "description": full_config.organization.description,
+                "stakeholders": [
+                    {
+                        "name": s.name,
+                        "weight": s.weight,
+                        "role": s.role,
+                        "description": s.description
+                    }
+                    for s in full_config.organization.stakeholders
+                ],
+                "stakeholder_context": full_config.organization.stakeholder_context
+            }
+
+            # Compute metadata from messages
+            from .message_view_formatter import MessageViewFormatter
+            metadata = MessageViewFormatter.compute_metadata(
+                messages=structured_messages,
+                org_context=org_context,
+                high_engagement_threshold=5
+            )
+
             # Determine view type for processor
             if user:
                 view_type = "user_timeline"
                 context = ViewContext(
                     channel_name=channel_name,
                     date_range=date_range_str,
-                    channels=normalized_channels
+                    channels=normalized_channels,
+                    org_context=org_context,
+                    metadata=metadata
                 )
                 formatter = EnrichedMessageViewFormatter(bucket_type=bucket_by)
             elif len(normalized_channels) > 1:
@@ -1132,14 +1171,18 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, date, st
                 context = ViewContext(
                     channel_name="Multi-Channel",
                     date_range=date_range_str,
-                    channels=normalized_channels
+                    channels=normalized_channels,
+                    org_context=org_context,
+                    metadata=metadata
                 )
                 formatter = EnrichedMessageViewFormatter(bucket_type=bucket_by)
             else:
                 view_type = "single_channel"
                 context = ViewContext(
                     channel_name=channel_name,
-                    date_range=date_range_str
+                    date_range=date_range_str,
+                    org_context=org_context,
+                    metadata=metadata
                 )
                 formatter = EnrichedMessageViewFormatter()
 
@@ -1181,7 +1224,8 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, date, st
             stream=True,
             reasoning_effort=reasoning_effort,
             view_type=view_type,
-            channels=normalized_channels
+            channels=normalized_channels,
+            org_context=org_context
         )
 
         # Display results
@@ -1406,6 +1450,191 @@ def sync(bucket, prefix, cache_path, region, profile, delete, dry_run):
             console.print(f"  - Test profile with: aws --profile {final_profile} s3 ls s3://{final_bucket}/")
     except Exception as e:
         console.print(f"[red]Sync failed: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+
+@cli.group()
+def config():
+    """Configuration management commands"""
+    pass
+
+
+@config.command('init')
+@click.option('--cache-path', default='cache', help='Cache directory to read users from (default: cache)')
+@click.option('--org-name', default='My Organization', help='Organization name')
+@click.option('--output', '-o', default='.slack-intel.yaml', help='Output config file path')
+@click.option('--force', '-f', is_flag=True, help='Overwrite existing config file')
+def config_init(cache_path, org_name, output, force):
+    """Initialize .slack-intel.yaml from cached users and channels (first-time setup)
+
+    Generates a config file with:
+    - All users from cache (with default weight 5)
+    - All channels from cache
+    - Ready for you to edit weights and descriptions
+
+    Examples:
+        \\b
+        # Generate config from cache (first time)
+        slack-intel config init
+
+        \\b
+        # Custom organization name and output path
+        slack-intel config init --org-name "Acme Corp" --output my-config.yaml
+
+        \\b
+        # Overwrite existing config (start over)
+        slack-intel config init --force
+    """
+    from .config import generate_initial_config
+
+    output_path = Path(output)
+
+    # Check if file exists
+    if output_path.exists() and not force:
+        console.print(f"[red]Error: {output} already exists[/red]")
+        console.print("[yellow]Use --force to overwrite, or use 'config sync-users' to add new users[/yellow]")
+        return
+
+    console.print(Panel.fit(
+        f"[bold cyan]🔧 Config Initialization[/bold cyan]\n"
+        f"Generating config from cache",
+        border_style="cyan"
+    ))
+
+    try:
+        # Read users from cache
+        console.print("[dim]Reading users from cache...[/dim]")
+        user_reader = ParquetUserReader(base_path=cache_path)
+        cached_users = user_reader.read_users()
+
+        if not cached_users:
+            console.print("[yellow]Warning: No users found in cache[/yellow]")
+            console.print("[dim]Run 'slack-intel cache' first to populate cache[/dim]")
+            cached_users = {}
+
+        # Get channels from existing config or use defaults
+        console.print("[dim]Loading existing channels...[/dim]")
+        try:
+            existing_config = load_config()
+            channels = existing_config
+        except Exception:
+            channels = DEFAULT_CHANNELS
+
+        # Generate config
+        console.print(f"[dim]Generating config with {len(cached_users)} users and {len(channels)} channels...[/dim]")
+        yaml_content = generate_initial_config(
+            users=cached_users,
+            channels=channels,
+            org_name=org_name,
+            output_path=output_path
+        )
+
+        # Summary
+        console.print()
+        console.print(f"[green]✓ Config generated: {output}[/green]")
+        console.print()
+        console.print("[bold]Next steps:[/bold]")
+        console.print(f"  1. Edit {output}:")
+        console.print("     - Set weight 7-10 for key stakeholders (CEO, VPs, leads)")
+        console.print("     - Delete entries you don't need to track")
+        console.print("     - Add channel descriptions and signal_type (critical/high/medium/low)")
+        console.print("  2. Run analysis:")
+        console.print("     slack-intel process --merge-channels --days 7")
+        console.print()
+        console.print("[dim]Later: Use 'slack-intel config sync-users' to add new team members[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Error generating config: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+
+@config.command('sync-users')
+@click.option('--cache-path', default='cache', help='Cache directory to read users from (default: cache)')
+@click.option('--config-path', default='.slack-intel.yaml', help='Config file path (default: .slack-intel.yaml)')
+def config_sync_users(cache_path, config_path):
+    """Add new users from cache to existing config (keeps your edits)
+
+    Merges new team members from cache into your config without overwriting
+    existing weights or descriptions. New users get default weight 5.
+
+    Examples:
+        \\b
+        # Add new users to existing config
+        slack-intel config sync-users
+
+        \\b
+        # Use custom config path
+        slack-intel config sync-users --config-path my-config.yaml
+    """
+    from .config import load_config, sync_users_to_config
+
+    config_file = Path(config_path)
+
+    # Check if config exists
+    if not config_file.exists():
+        console.print(f"[red]Error: {config_path} not found[/red]")
+        console.print("[yellow]Run 'slack-intel config init' first to create initial config[/yellow]")
+        return
+
+    console.print(Panel.fit(
+        f"[bold cyan]👥 Sync Users to Config[/bold cyan]\n"
+        f"Adding new users from cache",
+        border_style="cyan"
+    ))
+
+    try:
+        # Load existing config
+        console.print(f"[dim]Loading config from {config_path}...[/dim]")
+        existing_config = load_config(config_file)
+
+        existing_count = len(existing_config.organization.stakeholders)
+        console.print(f"[dim]Current config has {existing_count} stakeholders[/dim]")
+
+        # Read users from cache
+        console.print("[dim]Reading users from cache...[/dim]")
+        user_reader = ParquetUserReader(base_path=cache_path)
+        cached_users = user_reader.read_users()
+
+        if not cached_users:
+            console.print("[yellow]Warning: No users found in cache[/yellow]")
+            console.print("[dim]Run 'slack-intel cache' first to populate cache[/dim]")
+            return
+
+        console.print(f"[dim]Found {len(cached_users)} users in cache[/dim]")
+
+        # Sync users
+        console.print("[dim]Merging new users into config...[/dim]")
+        updated_config, new_users = sync_users_to_config(
+            existing_config=existing_config,
+            cached_users=cached_users,
+            output_path=config_file
+        )
+
+        # Summary
+        console.print()
+        if new_users:
+            console.print(f"[green]✓ Added {len(new_users)} new users to {config_path}[/green]")
+            console.print()
+            console.print("[bold]New users added:[/bold]")
+            for user in new_users[:20]:  # Show first 20
+                console.print(f"  • {user} (weight: 5)")
+            if len(new_users) > 20:
+                console.print(f"  ... and {len(new_users) - 20} more")
+
+            console.print()
+            console.print("[bold]Next steps:[/bold]")
+            console.print(f"  1. Edit {config_path}:")
+            console.print("     - Adjust weights for new leaders (7-10)")
+            console.print("     - Delete unneeded entries")
+            console.print("  2. Run analysis with updated config")
+        else:
+            console.print(f"[yellow]No new users found - config is up to date[/yellow]")
+            console.print(f"[dim]All {len(cached_users)} cached users already in config[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Error syncing users: {e}[/red]")
         import traceback
         console.print(f"[dim]{traceback.format_exc()}[/dim]")
 

@@ -1,0 +1,99 @@
+# Slack Intelligence Configuration (Simplified)
+# Generate this automatically:
+#   First time: slack-intel config init
+#   Add new users: slack-intel config sync-users
+
+# Organization Context
+organization:
+  name: "Your Company Name"
+  description: "Brief description of your organization"
+
+  # Stakeholders - SIMPLIFIED: name + weight + description
+  # Weight: 1-10 (higher = more attention gravity)
+  #   10 = CEO/Founder
+  #   8-9 = C-suite, VPs
+  #   7 = Directors, Senior Leads
+  #   5 = Default/Everyone else
+  stakeholders:
+    - name: "Sarah Chen"
+      weight: 10
+      role: "CEO"
+      description: "Company strategy and direction, product vision, key partnerships"
+
+    - name: "Ankita Sharma"
+      weight: 8
+      role: "VP Product"
+      description: "Product roadmap and prioritization, customer insights, feature decisions"
+
+    - name: "Dev Bharat"
+      weight: 7
+      role: "Engineering Lead"
+      description: "Technical architecture, engineering execution, infrastructure decisions"
+
+    - name: "Priya Gupta"
+      weight: 7
+      role: "Design Lead"
+      description: "User experience, design systems, product aesthetics"
+
+    # Add more stakeholders from 'slack-intel config init'
+    # Tip: Delete entries you don't need to track
+
+  # ALTERNATIVE: Freeform stakeholder context (instead of structured list above)
+  # stakeholder_context: |
+  #   Key people to track:
+  #   - Sarah Chen (CEO) - highest priority, drives company strategy
+  #   - Ankita Sharma (VP Product) - product decisions and roadmap
+  #   - Dev Bharat (Engineering Lead) - technical architecture
+  #   When these people engage, it signals high organizational importance.
+
+# Slack Channels
+channels:
+  - name: "general"
+    id: "C1234567890"
+    description: "Company-wide announcements and general discussion"
+    signal_type: "high"  # critical/high/medium/low
+
+  - name: "engineering"
+    id: "C9876543210"
+    description: "Engineering team coordination and technical decisions. Core product development."
+    signal_type: "high"
+
+  - name: "product"
+    id: "C2345678901"
+    description: "Product strategy, roadmap, and feature planning"
+    signal_type: "high"
+
+  - name: "incidents"
+    id: "C5678901234"
+    description: "Production incidents and emergency response"
+    signal_type: "critical"  # Always high attention
+
+  - name: "random"
+    id: "C1111111111"
+    description: "Water cooler chat and non-work banter"
+    signal_type: "low"  # Low priority for work analysis
+
+# Analysis Configuration (optional - defaults shown)
+# analysis:
+#   temporal:
+#     current_window_days: 7        # Primary analysis window
+#     comparison_window_days: 21    # For detecting appearing/disappearing topics
+#     persistence_threshold_days: 28 # Topics discussed N+ days = strategic
+#
+#   thresholds:
+#     high_velocity_hours: 4        # Decision in < N hours = fast
+#     thread_depth_significant: 5   # Thread with N+ replies = engaged
+#     participant_diversity: 3      # N+ people = cross-functional
+#     context_switch_rate: 5        # N+ topic switches/hour = chaos
+
+# S3 Storage (optional)
+# storage:
+#   s3:
+#     bucket: "your-slack-cache-bucket"
+#     prefix: "slack-intel/"
+#     region: "us-east-1"
+
+# JIRA Integration (optional)
+# jira:
+#   server: "https://your-company.atlassian.net"
+#   # Set JIRA_API_TOKEN env var for authentication

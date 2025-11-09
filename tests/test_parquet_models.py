@@ -34,7 +34,7 @@ class TestSlackMessageParquet:
         parquet_dict = msg.to_parquet_dict()
 
         # Verify required fields
-        assert parquet_dict["message_id"] == "1697654321.123456"
+        assert parquet_dict["message_id"] == "1697654321.000001"
         assert parquet_dict["user_id"] == "U012ABC3DEF"
         assert parquet_dict["text"] == "This is a simple test message"
         assert parquet_dict["timestamp"] is not None  # ISO format

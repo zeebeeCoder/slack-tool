@@ -12,6 +12,19 @@ from .time_bucketer import TimeBucketer, TimeBucket
 
 
 @dataclass
+class ViewMetadata:
+    """Computed metadata statistics for attention flow analysis"""
+    total_messages: int = 0
+    total_threads: int = 0
+    total_replies: int = 0
+    unique_participants: int = 0
+    avg_thread_depth: float = 0.0
+    high_engagement_threads: int = 0  # threads with N+ replies
+    leadership_messages: int = 0  # messages from high-weight stakeholders
+    cross_channel_topics: int = 0  # topics mentioned across multiple channels
+
+
+@dataclass
 class ViewContext:
     """Context information for view formatting
 
@@ -19,10 +32,14 @@ class ViewContext:
         channel_name: Name of the channel (or "Multi-Channel")
         date_range: Optional date range string (e.g., "2023-10-20" or "2023-10-18 to 2023-10-20")
         channels: Optional list of channels (for multi-channel views)
+        org_context: Optional organizational context (name, stakeholders, channel descriptions)
+        metadata: Optional computed metadata statistics
     """
     channel_name: str
     date_range: Optional[str] = None
     channels: Optional[List[str]] = field(default_factory=list)
+    org_context: Optional[Dict[str, Any]] = None  # From config
+    metadata: Optional[ViewMetadata] = None
 
 
 class MessageViewFormatter:
@@ -56,6 +73,82 @@ class MessageViewFormatter:
         self.resolve_mentions = resolve_mentions
         self.bucket_type = bucket_type
         self.user_mapping: Dict[str, str] = {}  # user_id -> display name
+
+    @staticmethod
+    def compute_metadata(
+        messages: List[Dict[str, Any]],
+        org_context: Optional[Dict[str, Any]] = None,
+        high_engagement_threshold: int = 5
+    ) -> ViewMetadata:
+        """Compute metadata statistics for attention flow analysis
+
+        Args:
+            messages: List of structured message dicts
+            org_context: Optional organizational context with stakeholders
+            high_engagement_threshold: Minimum replies for high engagement thread
+
+        Returns:
+            ViewMetadata with computed statistics
+        """
+        total_messages = len(messages)
+        total_threads = 0
+        total_replies = 0
+        unique_participants = set()
+        thread_depths = []
+        high_engagement_threads = 0
+        leadership_messages = 0
+
+        # Build stakeholder name set for quick lookup
+        leadership_names = set()
+        if org_context and org_context.get("stakeholders"):
+            for s in org_context["stakeholders"]:
+                if s.get("weight", 0) >= 7:  # High-weight stakeholders
+                    leadership_names.add(s.get("name", "").lower())
+
+        # Analyze messages
+        for msg in messages:
+            # Track participants
+            user_name = msg.get("user_real_name") or msg.get("user_name")
+            if user_name:
+                unique_participants.add(user_name)
+
+                # Check if leadership
+                if user_name.lower() in leadership_names:
+                    leadership_messages += 1
+
+            # Check for thread
+            replies = msg.get("replies", [])
+            if replies:
+                total_threads += 1
+                reply_count = len(replies)
+                total_replies += reply_count
+                thread_depths.append(reply_count)
+
+                if reply_count >= high_engagement_threshold:
+                    high_engagement_threads += 1
+
+                # Track reply participants
+                for reply in replies:
+                    reply_user = reply.get("user_real_name") or reply.get("user_name")
+                    if reply_user:
+                        unique_participants.add(reply_user)
+
+                        # Check if leadership in replies
+                        if reply_user.lower() in leadership_names:
+                            leadership_messages += 1
+
+        # Compute average thread depth
+        avg_thread_depth = sum(thread_depths) / len(thread_depths) if thread_depths else 0.0
+
+        return ViewMetadata(
+            total_messages=total_messages,
+            total_threads=total_threads,
+            total_replies=total_replies,
+            unique_participants=len(unique_participants),
+            avg_thread_depth=avg_thread_depth,
+            high_engagement_threads=high_engagement_threads,
+            leadership_messages=leadership_messages
+        )
 
     def format(
         self,
@@ -231,19 +324,70 @@ class MessageViewFormatter:
         return "\n".join(output_lines)
 
     def _format_header(self, context: ViewContext, messages: List[Dict[str, Any]]) -> List[str]:
-        """Format header section"""
+        """Format header section with optional metadata and organizational context"""
         lines = []
         lines.append("=" * 80)
 
+        # Organization context
+        if context.org_context and context.org_context.get("name"):
+            org_name = context.org_context.get("name")
+            lines.append(f"🏢 ORGANIZATION: {org_name}")
+
+        # Channel info
         if context.channels:
             # Multi-channel view
             lines.append(f"📱 SLACK CHANNELS: {', '.join(context.channels)}")
+
+            # Add channel descriptions if available
+            if context.org_context and context.org_context.get("channels"):
+                channel_map = {ch['name']: ch for ch in context.org_context['channels']}
+                for channel_name in context.channels:
+                    # Try with and without channel_ prefix
+                    ch_config = channel_map.get(channel_name) or channel_map.get(channel_name.replace("channel_", ""))
+                    if ch_config and ch_config.get("description"):
+                        lines.append(f"   • {channel_name}: {ch_config['description']}")
         else:
             # Single channel view
             lines.append(f"📱 SLACK CHANNEL: {context.channel_name}")
 
+            # Add channel description if available
+            if context.org_context and context.org_context.get("channels"):
+                channel_map = {ch['name']: ch for ch in context.org_context['channels']}
+                ch_name = context.channel_name.replace("channel_", "")
+                ch_config = channel_map.get(ch_name)
+                if ch_config and ch_config.get("description"):
+                    lines.append(f"   Purpose: {ch_config['description']}")
+
+        # Date range
         if context.date_range:
             lines.append(f"⏰ TIME WINDOW: {context.date_range}")
+
+        # Metadata section (if computed)
+        if context.metadata:
+            lines.append("")
+            lines.append("📊 CONVERSATION METRICS:")
+            meta = context.metadata
+            lines.append(f"   • Total Messages: {meta.total_messages}")
+            lines.append(f"   • Active Threads: {meta.total_threads} ({meta.total_replies} replies)")
+            if meta.avg_thread_depth > 0:
+                lines.append(f"   • Avg Thread Depth: {meta.avg_thread_depth:.1f} replies")
+            lines.append(f"   • Unique Participants: {meta.unique_participants}")
+            if meta.high_engagement_threads > 0:
+                lines.append(f"   • High Engagement Threads: {meta.high_engagement_threads} (5+ replies)")
+            if meta.leadership_messages > 0:
+                lines.append(f"   • Leadership Involvement: {meta.leadership_messages} messages from key stakeholders")
+
+        # Stakeholder context (if available)
+        if context.org_context and context.org_context.get("stakeholders"):
+            stakeholders = context.org_context["stakeholders"]
+            if stakeholders:
+                lines.append("")
+                lines.append("👥 KEY STAKEHOLDERS:")
+                for s in stakeholders[:5]:  # Show top 5
+                    role = s.get("role", "")
+                    weight = s.get("weight", 5)
+                    attention_level = "🔴" if weight >= 9 else "🟠" if weight >= 7 else "🟡"
+                    lines.append(f"   {attention_level} {s.get('name', '')} - {role}")
 
         lines.append("=" * 80)
 

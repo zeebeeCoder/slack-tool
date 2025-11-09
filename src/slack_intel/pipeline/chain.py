@@ -36,7 +36,8 @@ class ChainProcessor:
         stream: bool = True,
         reasoning_effort: str = "medium",
         view_type: str = "single_channel",
-        channels: list = None
+        channels: list = None,
+        org_context: dict = None
     ) -> AnalysisResult:
         """
         Run the complete chain-of-thought analysis on Slack messages
@@ -52,6 +53,7 @@ class ChainProcessor:
             reasoning_effort: Reasoning effort for GPT-5 (low, medium, high)
             view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
             channels: List of channel names (for multi-channel and user timeline views)
+            org_context: Optional organizational context (stakeholders, channel descriptions)
 
         Returns:
             Complete analysis result with summary and metrics
@@ -74,7 +76,8 @@ class ChainProcessor:
             stream=stream,
             reasoning_effort=reasoning_effort,
             view_type=view_type,
-            channels=channels
+            channels=channels,
+            org_context=org_context
         )
 
         # Calculate total time
@@ -98,7 +101,8 @@ class ChainProcessor:
         stream: bool = True,
         reasoning_effort: str = "medium",
         view_type: str = "single_channel",
-        channels: list = None
+        channels: list = None,
+        org_context: dict = None
     ) -> None:
         """
         Step 1: Process messages with LLM to generate summary
@@ -109,6 +113,7 @@ class ChainProcessor:
             reasoning_effort: Reasoning effort for GPT-5 (low, medium, high)
             view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
             channels: List of channel names (for multi-channel and user timeline views)
+            org_context: Optional organizational context (stakeholders, channel descriptions)
         """
         step_start = time.time()
 
@@ -128,7 +133,8 @@ class ChainProcessor:
                 stream=stream,
                 reasoning_effort=reasoning_effort,
                 view_type=view_type,
-                channels=channels
+                channels=channels,
+                org_context=org_context
             ):
                 summary_chunks.append(chunk)
 
