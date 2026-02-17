@@ -834,7 +834,8 @@ def stats(cache_path, format):
 @click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
 @click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
 @click.option('--output', '-o', help='Output file (default: print to console)')
-def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, output):
+@click.option('--auto-save', is_flag=True, help='Auto-save to timestamped file (e.g., backend-devs_2025-10-20_143022.txt)')
+def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, output, auto_save):
     """Generate formatted message view from Parquet cache
 
     Examples:
@@ -865,6 +866,11 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_d
         \\b
         # Save to file
         slack-intel view -c general --days 1 -o output.txt
+
+        \\b
+        # Auto-save with timestamped filename
+        slack-intel view -c backend-devs --days 7 --auto-save
+        # → saves to backend-devs_2025-10-20_143022.txt
     """
     try:
         # Determine channels to view
@@ -1080,9 +1086,23 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_d
 
         view_output = formatter.format(structured_messages, context, cached_users=cached_users)
 
+        # Resolve output path: explicit -o takes priority, then --auto-save
+        if not output and auto_save:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            if is_user_timeline:
+                prefix = f"user-{user}"
+            elif merge_channels:
+                prefix = "merged"
+            elif len(normalized_channels) == 1:
+                prefix = normalized_channels[0]
+            else:
+                prefix = f"{len(normalized_channels)}ch"
+            output = f"{prefix}_{timestamp}.txt"
+
         # Output
         if output:
             output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(view_output)
             console.print(f"[green]✓ View saved to {output}[/green]")
         else:
