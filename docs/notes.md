@@ -1,0 +1,5 @@
+- in the conf file add the ability to descirbe the channeles - short descirption, also could introduce tags. So maybe to group channels in views into tags. 
+- in the conf we could also add the user stakeholder mapping - this could adress function , role, hierarchy, intensity in the org
+- refine the super prompt for processing - cluster - classification - rank, sort, level of detail. 
+- for the llm processing pipeline - include additional metadata sort of facts - for future reference - ticket no, github pull requests, notion pages, any artifacts mentioned, maybe this could be added into fontmatter ? be good to append this into end of the processign result as toa handoff into another agent - JIRA tickets could be expanded.  
+- iterate on the Go project, assess where we are. 
