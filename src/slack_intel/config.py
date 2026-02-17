@@ -96,6 +96,8 @@ class SlackIntelConfig:
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     storage: Dict[str, Any] = field(default_factory=dict)
     jira: Dict[str, Any] = field(default_factory=dict)
+    credentials: Dict[str, Any] = field(default_factory=dict)  # Credentials (optional)
+    cache: Dict[str, Any] = field(default_factory=dict)  # Cache configuration
 
     def get_channel_by_name(self, name: str) -> Optional[ChannelConfig]:
         """Find channel config by name"""
@@ -113,6 +115,11 @@ class SlackIntelConfig:
 def load_config(config_path: Optional[Path] = None) -> SlackIntelConfig:
     """Load enhanced configuration from YAML file
 
+    Search order (if config_path not specified):
+    1. ~/.config/slack-intel/config.yaml (XDG standard, highest priority)
+    2. ~/.slack-intel.yaml (legacy support)
+    3. ./slack-intel.yaml (project-specific, lowest priority)
+
     Args:
         config_path: Optional path to config file. If None, searches default locations.
 
@@ -123,8 +130,9 @@ def load_config(config_path: Optional[Path] = None) -> SlackIntelConfig:
         config_paths = [config_path]
     else:
         config_paths = [
-            Path(".slack-intel.yaml"),
-            Path.home() / ".slack-intel.yaml",
+            Path.home() / ".config" / "slack-intel" / "config.yaml",  # XDG standard
+            Path.home() / ".slack-intel.yaml",  # Legacy support
+            Path(".slack-intel.yaml"),  # Project-specific
         ]
 
     for path in config_paths:
@@ -212,7 +220,9 @@ def _parse_config(raw: Dict[str, Any], source_path: Path) -> SlackIntelConfig:
         channels=channels,
         analysis=analysis,
         storage=raw.get("storage", {}),
-        jira=raw.get("jira", {})
+        jira=raw.get("jira", {}),
+        credentials=raw.get("credentials", {}),  # Optional credentials
+        cache=raw.get("cache", {})  # Optional cache configuration
     )
 
 

@@ -69,6 +69,211 @@ def cli():
 
 
 @cli.command()
+@click.option('--config-only', is_flag=True, help='Only create config file, skip credential prompts')
+def setup(config_only):
+    """Interactive setup for slack-intel configuration
+
+    This command helps you set up slack-intel for the first time by:
+    1. Creating the config directory (~/.config/slack-intel/)
+    2. Prompting for API credentials (Slack, JIRA, OpenAI)
+    3. Testing Slack connection
+    4. Generating initial organizational config
+    5. Setting secure file permissions
+
+    You can also run `config init` afterward to add organizational context.
+    """
+    import os
+    import stat
+    from .credentials import check_config_file_security
+
+    console.print(Panel.fit(
+        "[bold cyan]Slack Intelligence Setup[/bold cyan]\n"
+        "This wizard will help you configure slack-intel",
+        border_style="cyan"
+    ))
+    console.print()
+
+    # Create config directory
+    config_dir = Path.home() / ".config" / "slack-intel"
+    config_file = config_dir / "config.yaml"
+
+    if not config_dir.exists():
+        config_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]✓[/green] Created config directory: {config_dir}")
+    else:
+        console.print(f"[dim]Config directory exists: {config_dir}[/dim]")
+
+    # Check if config already exists
+    if config_file.exists() and not config_only:
+        console.print()
+        overwrite = click.confirm(
+            f"Config file already exists at {config_file}. Overwrite?",
+            default=False
+        )
+        if not overwrite:
+            console.print("[yellow]Setup cancelled.[/yellow]")
+            return
+
+    console.print()
+
+    # Gather credentials (unless config-only mode)
+    credentials = {}
+    if not config_only:
+        console.print("[bold]Step 1: API Credentials[/bold]")
+        console.print("[dim]You can also set these as environment variables later[/dim]")
+        console.print()
+
+        # Slack token
+        console.print("[cyan]Slack API Token[/cyan]")
+        console.print("Get your token from: https://api.slack.com/apps")
+        slack_token = click.prompt(
+            "Enter Slack Bot Token (xoxb-...) or User Token (xoxp-...)",
+            hide_input=True,
+            default="",
+            show_default=False
+        )
+
+        if slack_token:
+            if slack_token.startswith("xoxp-"):
+                credentials.setdefault("slack", {})["user_token"] = slack_token
+            elif slack_token.startswith("xoxb-"):
+                credentials.setdefault("slack", {})["bot_token"] = slack_token
+            else:
+                console.print("[yellow]Warning: Token doesn't start with xoxp- or xoxb-[/yellow]")
+                credentials.setdefault("slack", {})["bot_token"] = slack_token
+
+        console.print()
+
+        # JIRA credentials
+        console.print("[cyan]JIRA Credentials[/cyan]")
+        console.print("Get your API token from: https://id.atlassian.com/manage-profile/security/api-tokens")
+        jira_server = click.prompt(
+            "JIRA Server URL (e.g., https://your-domain.atlassian.net)",
+            default="",
+            show_default=False
+        )
+        jira_username = click.prompt(
+            "JIRA Username/Email",
+            default="",
+            show_default=False
+        )
+        jira_token = click.prompt(
+            "JIRA API Token",
+            hide_input=True,
+            default="",
+            show_default=False
+        )
+
+        if jira_server or jira_username or jira_token:
+            credentials.setdefault("jira", {})
+            if jira_server:
+                credentials["jira"]["server"] = jira_server
+            if jira_username:
+                credentials["jira"]["username"] = jira_username
+            if jira_token:
+                credentials["jira"]["api_token"] = jira_token
+
+        console.print()
+
+        # OpenAI API key (optional)
+        console.print("[cyan]OpenAI API Key (Optional)[/cyan]")
+        console.print("Only needed for `process` command with LLM analysis")
+        console.print("Get your key from: https://platform.openai.com/api-keys")
+        openai_key = click.prompt(
+            "OpenAI API Key (sk-...)",
+            hide_input=True,
+            default="",
+            show_default=False
+        )
+
+        if openai_key:
+            credentials.setdefault("openai", {})["api_key"] = openai_key
+
+        # Test Slack connection if token provided
+        if slack_token:
+            console.print()
+            console.print("[bold]Testing Slack connection...[/bold]")
+            try:
+                # Temporarily set env var for testing
+                os.environ["SLACK_API_TOKEN"] = slack_token
+                manager = SlackChannelManager()
+                # Try to list channels (will validate token)
+                console.print("[green]✓[/green] Slack connection successful!")
+            except Exception as e:
+                console.print(f"[yellow]⚠[/yellow]  Could not verify Slack connection: {e}")
+                console.print("[dim]You can continue anyway and fix the token later[/dim]")
+
+    console.print()
+    console.print("[bold]Step 2: Creating configuration file[/bold]")
+
+    # Build config structure
+    config_data = {
+        "organization": {
+            "name": "My Organization",
+            "description": "Organization description",
+            "stakeholders": [],
+            "stakeholder_context": ""
+        },
+        "channels": [],
+        "cache": {
+            "path": "~/.cache/slack-intel"
+        }
+    }
+
+    # Add credentials if provided
+    if credentials:
+        config_data["credentials"] = credentials
+
+    # Add JIRA server to jira section (backward compatibility)
+    if credentials.get("jira", {}).get("server"):
+        config_data["jira"] = {"server": credentials["jira"]["server"]}
+
+    # Write config file
+    try:
+        with open(config_file, 'w') as f:
+            yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+        console.print(f"[green]✓[/green] Created config file: {config_file}")
+
+        # Set secure permissions (600 - owner read/write only)
+        config_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        console.print("[green]✓[/green] Set secure file permissions (600)")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to create config: {e}")
+        return
+
+    # Create cache directory
+    console.print()
+    cache_dir = Path.home() / ".cache" / "slack-intel"
+    if not cache_dir.exists():
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]✓[/green] Created cache directory: {cache_dir}")
+
+    # Success summary
+    console.print()
+    console.print(Panel.fit(
+        "[bold green]Setup Complete! [/bold green]\n\n"
+        f"Config file: {config_file}\n"
+        f"Cache directory: {cache_dir}\n\n"
+        "[bold]Next steps:[/bold]\n"
+        "1. Run `slack-intel config init` to generate organizational context\n"
+        "2. Run `slack-intel cache --channel <channel-name>` to start caching\n"
+        "3. Run `slack-intel view --channel <channel-name>` to view messages",
+        border_style="green"
+    ))
+
+    # Security reminder
+    if credentials:
+        console.print()
+        console.print("[yellow]Security Note:[/yellow]")
+        console.print("Your credentials are stored in the config file with secure permissions (600).")
+        console.print("For production/shared systems, consider using environment variables instead:")
+        console.print("  export SLACK_API_TOKEN='your-token'")
+        console.print("  export JIRA_API_TOKEN='your-token'")
+        console.print("  export OPENAI_API_KEY='your-key'")
+
+
+@cli.command()
 @click.option('--channel', '-c', multiple=True, help='Channel ID(s) to cache (overrides config)')
 @click.option('--days', '-d', default=7, help='Days to look back (default: 7)')
 @click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
@@ -907,8 +1112,10 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_d
 @click.option('--max-tokens', default=4000, type=int, help='Maximum tokens in response (default: 4000, not used for GPT-5)')
 @click.option('--reasoning-effort', type=click.Choice(['low', 'medium', 'high']), default='medium',
               help='Reasoning effort for GPT-5 (default: medium)')
+@click.option('--instructions', help='Custom analysis instructions (overrides default prompt)')
+@click.option('--instructions-file', type=click.Path(exists=True), help='Load instructions from file')
 @click.option('--format', type=click.Choice(['text', 'json']), default='text', help='Output format (default: text)')
-def process(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, format):
+def process(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, input, output, model, temperature, max_tokens, reasoning_effort, instructions, instructions_file, format):
     """Process Slack messages with LLM to generate summaries and insights
 
     This command uses OpenAI's API to analyze Slack conversations. It can either:
@@ -942,16 +1149,32 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, days, en
     """
     import os
     from .pipeline import ChainProcessor
+    from .credentials import get_openai_key, CredentialError
 
-    # Check for OpenAI API key
-    openai_api_key = os.getenv('OPENAI_API_KEY')
-    if not openai_api_key:
-        console.print("[red]Error: OPENAI_API_KEY environment variable not set[/red]")
+    # Check for OpenAI API key (env var or config file)
+    try:
+        openai_api_key = get_openai_key()
+    except CredentialError as e:
+        console.print("[red]Error: OpenAI API key not found[/red]")
         console.print("[yellow]Please set your OpenAI API key:[/yellow]")
-        console.print("  export OPENAI_API_KEY='your-api-key-here'")
+        console.print("  Option 1: Environment variable")
+        console.print("    export OPENAI_API_KEY='your-api-key-here'")
+        console.print("  Option 2: Config file")
+        console.print("    Run 'slack-intel setup' to configure")
         return
 
     try:
+        # Load custom instructions if provided
+        custom_instructions = None
+        if instructions_file:
+            # Load from file
+            instructions_path = Path(instructions_file)
+            console.print(f"[dim]Loading custom instructions from {instructions_file}...[/dim]")
+            custom_instructions = instructions_path.read_text()
+        elif instructions:
+            # Use inline string
+            custom_instructions = instructions
+
         # Initialize processor
         processor = ChainProcessor(openai_api_key)
 
@@ -1225,7 +1448,8 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, days, en
             reasoning_effort=reasoning_effort,
             view_type=view_type,
             channels=normalized_channels,
-            org_context=org_context
+            org_context=org_context,
+            custom_instructions=custom_instructions
         )
 
         # Display results

@@ -478,31 +478,34 @@ class SlackChannelManager:
         self.jira_client: JIRA = self._init_jira()
 
     def _get_slack_token(self) -> str:
-        """Get Slack token with user token preference (feature toggle)
+        """Get Slack token with hybrid environment/config support
 
-        Checks for SLACK_USER_TOKEN first (OAuth user token), falls back to
-        SLACK_API_TOKEN (bot token) for backward compatibility.
+        Priority:
+        1. Environment variables (SLACK_USER_TOKEN or SLACK_API_TOKEN)
+        2. Config file credentials (credentials.slack.user_token or bot_token)
 
         Returns:
             str: Slack API token (xoxp- for user, xoxb- for bot)
-        """
-        user_token = os.getenv("SLACK_USER_TOKEN")
-        bot_token = os.getenv("SLACK_API_TOKEN")
 
-        if user_token:
-            token_type = self._detect_token_type(user_token)
-            self.logger.info(
-                f"Using USER token ({token_type}) - OAuth mode enabled"
-            )
-            return user_token
-        elif bot_token:
-            token_type = self._detect_token_type(bot_token)
-            self.logger.info(f"Using BOT token ({token_type}) - Classic bot mode")
-            return bot_token
-        else:
-            raise ValueError(
-                "No Slack token found. Set SLACK_USER_TOKEN or SLACK_API_TOKEN"
-            )
+        Raises:
+            ValueError: If no token found
+        """
+        from .credentials import get_slack_token, CredentialError
+
+        try:
+            token = get_slack_token()
+            token_type = self._detect_token_type(token)
+
+            if token.startswith("xoxp-"):
+                self.logger.info(
+                    f"Using USER token ({token_type}) - OAuth mode enabled"
+                )
+            else:
+                self.logger.info(f"Using BOT token ({token_type}) - Classic bot mode")
+
+            return token
+        except CredentialError as e:
+            raise ValueError(str(e))
 
     def _detect_token_type(self, token: str) -> str:
         """Detect Slack token type from prefix
@@ -523,49 +526,34 @@ class SlackChannelManager:
             return "unknown"
 
     def _validate_env(self) -> None:
-        """Validate required environment variables exist"""
-        self.logger.debug("Validating environment variables")
-        # Slack token now optional (checked in _get_slack_token)
-        required_vars = ["JIRA_API_TOKEN", "JIRA_USER_NAME"]
-        for var in required_vars:
-            assert (
-                var in os.environ
-            ), f"{var} not found in environment variables"
+        """Validate required credentials exist (env vars or config file)"""
+        self.logger.debug("Validating credentials")
+        from .credentials import get_jira_credentials, get_slack_token, CredentialError
+
+        # Validate Slack token
+        try:
+            get_slack_token()
+        except CredentialError as e:
+            raise ValueError(f"Slack credential validation failed: {e}")
+
+        # Validate JIRA credentials
+        try:
+            get_jira_credentials()
+        except CredentialError as e:
+            raise ValueError(f"JIRA credential validation failed: {e}")
 
     def _init_jira(self) -> JIRA:
-        """Initialize JIRA client"""
-        # Try to load JIRA server from config file
-        jira_server = os.environ.get("JIRA_SERVER")
+        """Initialize JIRA client with hybrid credential support"""
+        from .credentials import get_jira_credentials, CredentialError
 
-        if not jira_server:
-            # Try to load from .slack-intel.yaml
-            config_paths = [
-                Path(".slack-intel.yaml"),
-                Path.home() / ".slack-intel.yaml",
-            ]
-
-            for config_path in config_paths:
-                if config_path.exists():
-                    try:
-                        import yaml
-                        with open(config_path) as f:
-                            config = yaml.safe_load(f)
-                            if config and "jira" in config and "server" in config["jira"]:
-                                jira_server = config["jira"]["server"]
-                                break
-                    except Exception:
-                        continue
-
-        # Fallback to default if still not found
-        if not jira_server:
-            jira_server = "https://your-domain.atlassian.net"
+        try:
+            username, api_token, server = get_jira_credentials()
+        except CredentialError as e:
+            raise ValueError(f"Failed to initialize JIRA client: {e}")
 
         return JIRA(
-            basic_auth=(
-                os.environ["JIRA_USER_NAME"],
-                os.environ["JIRA_API_TOKEN"],
-            ),
-            server=jira_server,
+            basic_auth=(username, api_token),
+            server=server,
         )
 
     async def get_messages(
