@@ -62,7 +62,7 @@ def sample_file() -> SlackFile:
 def sample_message_basic() -> SlackMessage:
     """Create a basic message with minimal fields"""
     return SlackMessage(
-        ts="1697654321.123456",  # 2023-10-18 ~17:38 UTC
+        ts="1697654321.000001",  # 2023-10-18 ~17:38 UTC (unique ts)
         user="U012ABC3DEF",
         text="This is a simple test message"
     )
@@ -71,7 +71,7 @@ def sample_message_basic() -> SlackMessage:
 def sample_message_with_user_info() -> SlackMessage:
     """Create a message with full user info"""
     return SlackMessage(
-        ts="1697654321.123456",
+        ts="1697654321.000002",  # Unique timestamp
         user="U012ABC3DEF",
         text="Message with user details",
         user_info=sample_user()
@@ -81,7 +81,7 @@ def sample_message_with_user_info() -> SlackMessage:
 def sample_message_with_reactions() -> SlackMessage:
     """Create a message with reactions"""
     return SlackMessage(
-        ts="1697654321.123456",
+        ts="1697654321.000003",  # Unique timestamp
         user="U012ABC3DEF",
         text="Great job team!",
         user_info=sample_user(),
@@ -95,7 +95,7 @@ def sample_message_with_reactions() -> SlackMessage:
 def sample_message_with_files() -> SlackMessage:
     """Create a message with file attachments"""
     return SlackMessage(
-        ts="1697654321.123456",
+        ts="1697654321.000004",  # Unique timestamp
         user="U012ABC3DEF",
         text="Check out this screenshot",
         user_info=sample_user(),
@@ -106,7 +106,7 @@ def sample_message_with_files() -> SlackMessage:
 def sample_message_with_jira() -> SlackMessage:
     """Create a message with JIRA ticket references in text"""
     return SlackMessage(
-        ts="1697654321.123456",
+        ts="1697654321.000005",  # Unique timestamp
         user="U012ABC3DEF",
         text="Working on PROJ-123 and PROJ-456 today. Need to finish PROJ-789.",
         user_info=sample_user()

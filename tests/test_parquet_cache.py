@@ -130,8 +130,8 @@ class TestParquetCacheSaveMessages:
         assert Path(file1).exists()
         assert Path(file2).exists()
 
-    def test_overwrite_existing_partition(self):
-        """Test overwriting existing partition"""
+    def test_merge_existing_partition(self):
+        """Test merging with existing partition (upsert semantics)"""
         from slack_intel.parquet_cache import ParquetCache
 
         cache = ParquetCache(base_path=str(self.cache_dir))
@@ -146,7 +146,7 @@ class TestParquetCacheSaveMessages:
         table1 = pq.read_table(file1)
         assert table1.num_rows == 1
 
-        # Overwrite with different batch
+        # Merge with different batch (new messages)
         messages2 = [
             sample_message_with_user_info(),
             sample_message_with_reactions(),
@@ -156,9 +156,9 @@ class TestParquetCacheSaveMessages:
         # Should be same file path
         assert file1 == file2
 
-        # Should have 2 rows (overwritten)
+        # Should have 3 rows (merged: 1 original + 2 new)
         table2 = pq.read_table(file2)
-        assert table2.num_rows == 2
+        assert table2.num_rows == 3
 
     def test_directory_creation(self):
         """Test that directories are created automatically"""
@@ -505,8 +505,8 @@ class TestParquetCacheJiraTickets:
         table = pq.read_table(file_path)
         assert table.num_rows == 0
 
-    def test_jira_overwrite_existing_partition(self):
-        """Test overwriting existing JIRA partition"""
+    def test_jira_merge_existing_partition(self):
+        """Test merging existing JIRA partition (upsert semantics)"""
         from slack_intel.parquet_cache import ParquetCache
         import pyarrow.parquet as pq
 
@@ -520,17 +520,16 @@ class TestParquetCacheJiraTickets:
         table1 = pq.read_table(file1)
         assert table1.num_rows == 1
 
-        # Overwrite with different batch
+        # Merge with different batch (new tickets)
         tickets2 = [
-            sample_jira_ticket_basic(),
-            sample_jira_ticket_full(),
+            sample_jira_ticket_full(),  # Different ticket
         ]
         file2 = cache.save_jira_tickets(tickets2, "2023-10-18")
 
         # Should be same file path
         assert file1 == file2
 
-        # Should have 2 rows (overwritten)
+        # Should have 2 rows (merged: 1 original + 1 new)
         table2 = pq.read_table(file2)
         assert table2.num_rows == 2
 

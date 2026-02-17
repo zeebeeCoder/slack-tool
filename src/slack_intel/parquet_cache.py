@@ -176,17 +176,6 @@ class ParquetCache:
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
             raise ValueError(f"Invalid date format: {date}. Expected YYYY-MM-DD")
 
-        # Handle empty message list
-        if not messages:
-            # Create empty table with schema
-            table = pa.Table.from_pylist([], schema=self.message_schema)
-        else:
-            # Convert messages to dicts using to_parquet_dict()
-            data = [msg.to_parquet_dict() for msg in messages]
-
-            # Create PyArrow table
-            table = pa.Table.from_pylist(data, schema=self.message_schema)
-
         # Generate partition path
         partition_key = f"dt={date}/channel={channel.name}"
         partition_dir = Path(self.base_path) / "messages" / partition_key
@@ -195,8 +184,11 @@ class ParquetCache:
         # Ensure directory exists
         self._ensure_directory_exists(str(partition_dir))
 
-        # Write to Parquet (overwrite mode)
-        # Note: If file exists, it will be overwritten automatically
+        # Merge new messages with existing (upsert semantics)
+        # This implements exactly-once delivery and idempotent caching
+        table = self._merge_messages(file_path, messages, self.message_schema)
+
+        # Write merged table to Parquet
         pq.write_table(
             table,
             str(file_path),
@@ -227,27 +219,9 @@ class ParquetCache:
             >>> tickets = [JiraTicket(ticket="PRD-123", summary="Fix bug", ...)]
             >>> path = cache.save_jira_tickets(tickets, "2023-10-18")
         """
-        from datetime import datetime
-
         # Validate date format
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
             raise ValueError(f"Invalid date format: {date}. Expected YYYY-MM-DD")
-
-        # Handle empty ticket list
-        if not tickets:
-            # Create empty table with schema
-            table = pa.Table.from_pylist([], schema=self.jira_schema)
-        else:
-            # Convert tickets to dicts using to_parquet_dict()
-            data = [ticket.to_parquet_dict() for ticket in tickets]
-
-            # Add cached_at timestamp to all records
-            now = datetime.utcnow()
-            for row in data:
-                row['cached_at'] = now
-
-            # Create PyArrow table
-            table = pa.Table.from_pylist(data, schema=self.jira_schema)
 
         # Generate partition path: cache/raw/jira/dt=2025-10-20/data.parquet
         partition_dir = Path(self.base_path) / "jira" / f"dt={date}"
@@ -256,7 +230,10 @@ class ParquetCache:
         # Ensure directory exists
         self._ensure_directory_exists(str(partition_dir))
 
-        # Write to Parquet (overwrite mode)
+        # Merge new tickets with existing (upsert semantics)
+        table = self._merge_jira_tickets(file_path, tickets, self.jira_schema)
+
+        # Write merged table to Parquet
         pq.write_table(
             table,
             str(file_path),
@@ -264,6 +241,132 @@ class ParquetCache:
         )
 
         return str(file_path).replace("\\", "/")
+
+    def _merge_messages(
+        self,
+        file_path: Path,
+        new_messages: List[SlackMessage],
+        schema: pa.Schema
+    ) -> pa.Table:
+        """Merge new messages with existing messages in partition (upsert semantics)
+
+        This implements exactly-once semantics by:
+        1. Loading existing messages (if file exists)
+        2. Merging by message_id (primary key)
+        3. Deduplicating within batch and across runs
+        4. Preserving existing data on empty batches
+
+        Args:
+            file_path: Path to partition file
+            new_messages: List of new SlackMessage objects
+            schema: PyArrow schema for messages
+
+        Returns:
+            Merged PyArrow table with deduplicated messages
+        """
+        # 1. Load existing data (if file exists)
+        existing_messages = {}
+        if file_path.exists():
+            try:
+                existing_table = pq.read_table(str(file_path))
+                existing_data = existing_table.to_pydict()
+
+                # Index by message_id for O(1) lookup
+                for i in range(existing_table.num_rows):
+                    msg_id = existing_data['message_id'][i]
+                    # Reconstruct row as dict
+                    existing_messages[msg_id] = {
+                        col: existing_data[col][i]
+                        for col in existing_data.keys()
+                    }
+            except Exception as e:
+                # Log warning but continue (file might be corrupt)
+                print(f"Warning: Could not read existing partition {file_path}: {e}")
+                print("Creating new partition...")
+
+        # 2. Convert new messages to dict, indexed by message_id
+        new_messages_dict = {}
+        for msg in new_messages:
+            msg_dict = msg.to_parquet_dict()
+            msg_id = msg_dict['message_id']
+            new_messages_dict[msg_id] = msg_dict
+
+        # 3. Merge: existing + new (new overwrites on conflict - upsert semantics)
+        # Use dict unpacking for explicit merge order (new values override existing)
+        merged = {**existing_messages, **new_messages_dict}
+
+        # 4. Convert back to list and sort by message_id for deterministic ordering
+        merged_list = list(merged.values())
+        merged_list.sort(key=lambda x: x['message_id'])
+
+        # 5. Create PyArrow table
+        if merged_list:
+            table = pa.Table.from_pylist(merged_list, schema=schema)
+        else:
+            # Empty result - create empty table with schema
+            table = pa.Table.from_pylist([], schema=schema)
+
+        return table
+
+    def _merge_jira_tickets(
+        self,
+        file_path: Path,
+        new_tickets: List[JiraTicket],
+        schema: pa.Schema
+    ) -> pa.Table:
+        """Merge new JIRA tickets with existing tickets in partition (upsert semantics)
+
+        Args:
+            file_path: Path to partition file
+            new_tickets: List of new JiraTicket objects
+            schema: PyArrow schema for JIRA tickets
+
+        Returns:
+            Merged PyArrow table with deduplicated tickets
+        """
+        from datetime import datetime
+
+        # 1. Load existing data (if file exists)
+        existing_tickets = {}
+        if file_path.exists():
+            try:
+                existing_table = pq.read_table(str(file_path))
+                existing_data = existing_table.to_pydict()
+
+                # Index by ticket_id
+                for i in range(existing_table.num_rows):
+                    ticket_id = existing_data['ticket_id'][i]
+                    existing_tickets[ticket_id] = {
+                        col: existing_data[col][i]
+                        for col in existing_data.keys()
+                    }
+            except Exception as e:
+                print(f"Warning: Could not read existing JIRA partition {file_path}: {e}")
+                print("Creating new partition...")
+
+        # 2. Convert new tickets to dict
+        new_tickets_dict = {}
+        now = datetime.utcnow()
+        for ticket in new_tickets:
+            ticket_dict = ticket.to_parquet_dict()
+            ticket_dict['cached_at'] = now
+            ticket_id = ticket_dict['ticket_id']
+            new_tickets_dict[ticket_id] = ticket_dict
+
+        # 3. Merge (upsert semantics) - new values override existing
+        merged = {**existing_tickets, **new_tickets_dict}
+
+        # 4. Convert back to list and sort
+        merged_list = list(merged.values())
+        merged_list.sort(key=lambda x: x['ticket_id'])
+
+        # 5. Create PyArrow table
+        if merged_list:
+            table = pa.Table.from_pylist(merged_list, schema=schema)
+        else:
+            table = pa.Table.from_pylist([], schema=schema)
+
+        return table
 
     def _ensure_directory_exists(self, path: str):
         """Create directory if it doesn't exist
