@@ -37,7 +37,8 @@ class ChainProcessor:
         reasoning_effort: str = "medium",
         view_type: str = "single_channel",
         channels: list = None,
-        org_context: dict = None
+        org_context: dict = None,
+        custom_instructions: str = None
     ) -> AnalysisResult:
         """
         Run the complete chain-of-thought analysis on Slack messages
@@ -54,6 +55,7 @@ class ChainProcessor:
             view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
             channels: List of channel names (for multi-channel and user timeline views)
             org_context: Optional organizational context (stakeholders, channel descriptions)
+            custom_instructions: Optional custom analysis instructions (overrides default prompts)
 
         Returns:
             Complete analysis result with summary and metrics
@@ -77,7 +79,8 @@ class ChainProcessor:
             reasoning_effort=reasoning_effort,
             view_type=view_type,
             channels=channels,
-            org_context=org_context
+            org_context=org_context,
+            custom_instructions=custom_instructions
         )
 
         # Calculate total time
@@ -102,7 +105,8 @@ class ChainProcessor:
         reasoning_effort: str = "medium",
         view_type: str = "single_channel",
         channels: list = None,
-        org_context: dict = None
+        org_context: dict = None,
+        custom_instructions: str = None
     ) -> None:
         """
         Step 1: Process messages with LLM to generate summary
@@ -114,6 +118,7 @@ class ChainProcessor:
             view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
             channels: List of channel names (for multi-channel and user timeline views)
             org_context: Optional organizational context (stakeholders, channel descriptions)
+            custom_instructions: Optional custom analysis instructions (overrides default prompts)
         """
         step_start = time.time()
 
@@ -134,7 +139,8 @@ class ChainProcessor:
                 reasoning_effort=reasoning_effort,
                 view_type=view_type,
                 channels=channels,
-                org_context=org_context
+                org_context=org_context,
+                custom_instructions=custom_instructions
             ):
                 summary_chunks.append(chunk)
 

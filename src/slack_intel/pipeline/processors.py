@@ -6,9 +6,17 @@ from openai import OpenAI
 
 
 class PromptTemplates:
-    """Prompt templates for different processing stages with attention flow awareness"""
+    """Prompt templates for different processing stages with attention flow awareness
 
-    SUMMARIZE_MESSAGES = """You are analyzing Slack channel messages to provide actionable insights.
+    Templates are split into:
+    - FOUNDATION_* : Data context (channel, date, messages) - always included
+    - INSTRUCTIONS_*: Analysis instructions - can be customized
+    - SUMMARIZE_*   : Full templates (foundation + instructions) - for backward compatibility
+    """
+
+    # === FOUNDATIONS (Data Context) ===
+
+    FOUNDATION_MESSAGES = """You are analyzing Slack channel messages to provide actionable insights.
 
 Channel: {channel_name}
 Date Range: {date_range}
@@ -16,9 +24,32 @@ Date Range: {date_range}
 {org_context}
 
 Messages:
-{message_content}
+{message_content}"""
 
-Please provide a comprehensive summary using the Attention Flow framework:
+    FOUNDATION_USER_TIMELINE = """You are analyzing a Slack user's timeline to understand their contributions and communication patterns.
+
+User: {channel_name}
+Date Range: {date_range}
+Channels: {channels}
+
+{org_context}
+
+Messages:
+{message_content}"""
+
+    FOUNDATION_MULTI_CHANNEL = """You are analyzing messages across multiple Slack channels to map organizational attention flow.
+
+Channels: {channels}
+Date Range: {date_range}
+
+{org_context}
+
+Messages:
+{message_content}"""
+
+    # === INSTRUCTIONS (Analysis Framework) ===
+
+    INSTRUCTIONS_MESSAGES = """Please provide a comprehensive summary using the Attention Flow framework:
 
 1. **KEY DISCUSSIONS** (What captured attention):
    - Main topics and their intensity level
@@ -47,18 +78,7 @@ Please provide a comprehensive summary using the Attention Flow framework:
 
 Focus on actionable insights with attention ranking based on leadership involvement, cross-functional engagement, and decision velocity."""
 
-    SUMMARIZE_USER_TIMELINE = """You are analyzing a Slack user's timeline to understand their contributions and communication patterns.
-
-User: {channel_name}
-Date Range: {date_range}
-Channels: {channels}
-
-{org_context}
-
-Messages:
-{message_content}
-
-Please provide a comprehensive analysis using the Attention Flow framework:
+    INSTRUCTIONS_USER_TIMELINE = """Please provide a comprehensive analysis using the Attention Flow framework:
 
 1. **FOCAL POINTS** (Where their attention is concentrated):
    - Top 3-5 topics/initiatives they're driving or contributing to
@@ -92,17 +112,7 @@ Please provide a comprehensive analysis using the Attention Flow framework:
 
 Focus on understanding this person's role, impact level, and attention distribution across tactical vs. strategic work."""
 
-    SUMMARIZE_MULTI_CHANNEL = """You are analyzing messages across multiple Slack channels to map organizational attention flow.
-
-Channels: {channels}
-Date Range: {date_range}
-
-{org_context}
-
-Messages:
-{message_content}
-
-Please provide a comprehensive Organizational Attention Flow analysis:
+    INSTRUCTIONS_MULTI_CHANNEL = """Please provide a comprehensive Organizational Attention Flow analysis:
 
 ## 1. FOCAL POINTS (Where organizational attention is concentrated)
 
@@ -169,6 +179,13 @@ Identify the top 3-5 topics/initiatives consuming organizational energy:
 
 Focus on synthesizing cross-channel patterns, ranking attention by leadership involvement and engagement intensity."""
 
+    # === FULL TEMPLATES (Backward Compatibility) ===
+    # These combine foundation + instructions for existing code
+
+    SUMMARIZE_MESSAGES = FOUNDATION_MESSAGES + "\n\n" + INSTRUCTIONS_MESSAGES
+    SUMMARIZE_USER_TIMELINE = FOUNDATION_USER_TIMELINE + "\n\n" + INSTRUCTIONS_USER_TIMELINE
+    SUMMARIZE_MULTI_CHANNEL = FOUNDATION_MULTI_CHANNEL + "\n\n" + INSTRUCTIONS_MULTI_CHANNEL
+
 
 class OpenAIProcessor:
     """
@@ -195,7 +212,8 @@ class OpenAIProcessor:
         reasoning_effort: str = "medium",
         view_type: str = "single_channel",
         channels: list = None,
-        org_context: dict = None
+        org_context: dict = None,
+        custom_instructions: str = None
     ) -> Iterator[str]:
         """
         Generate a summary of Slack messages using OpenAI
@@ -212,6 +230,7 @@ class OpenAIProcessor:
             view_type: Type of view ("single_channel", "multi_channel", "user_timeline")
             channels: List of channel names (for multi-channel and user timeline views)
             org_context: Optional organizational context (stakeholders, channel descriptions)
+            custom_instructions: Optional custom analysis instructions (overrides default prompts)
 
         Yields:
             Chunks of generated text if streaming, full text otherwise
@@ -221,11 +240,12 @@ class OpenAIProcessor:
         if org_context:
             org_context_str = self._format_org_context(org_context, view_type, channels)
 
-        # Select appropriate prompt template based on view type
+        # Build prompt: foundation + (custom instructions OR default instructions)
         if view_type == "user_timeline":
-            template = PromptTemplates.SUMMARIZE_USER_TIMELINE
+            foundation = PromptTemplates.FOUNDATION_USER_TIMELINE
+            default_instructions = PromptTemplates.INSTRUCTIONS_USER_TIMELINE
             channels_str = ", ".join(channels) if channels else "multiple channels"
-            prompt = template.format(
+            foundation_formatted = foundation.format(
                 channel_name=channel_name,
                 date_range=date_range,
                 channels=channels_str,
@@ -233,22 +253,28 @@ class OpenAIProcessor:
                 message_content=message_content
             )
         elif view_type == "multi_channel":
-            template = PromptTemplates.SUMMARIZE_MULTI_CHANNEL
+            foundation = PromptTemplates.FOUNDATION_MULTI_CHANNEL
+            default_instructions = PromptTemplates.INSTRUCTIONS_MULTI_CHANNEL
             channels_str = ", ".join(channels) if channels else "multiple channels"
-            prompt = template.format(
+            foundation_formatted = foundation.format(
                 channels=channels_str,
                 date_range=date_range,
                 org_context=org_context_str,
                 message_content=message_content
             )
         else:  # single_channel
-            template = PromptTemplates.SUMMARIZE_MESSAGES
-            prompt = template.format(
+            foundation = PromptTemplates.FOUNDATION_MESSAGES
+            default_instructions = PromptTemplates.INSTRUCTIONS_MESSAGES
+            foundation_formatted = foundation.format(
                 channel_name=channel_name,
                 date_range=date_range,
                 org_context=org_context_str,
                 message_content=message_content
             )
+
+        # Use custom instructions if provided, otherwise use default
+        instructions = custom_instructions if custom_instructions else default_instructions
+        prompt = foundation_formatted + "\n\n" + instructions
 
         try:
             # GPT-5 uses the new Responses API
