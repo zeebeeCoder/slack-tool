@@ -832,7 +832,7 @@ def stats(cache_path, format):
               help='Time bucketing for multi-channel view (default: hour)')
 @click.option('--days', '-d', default=7, help='Days to look back (default: 7)')
 @click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
-@click.option('--cache-path', default='cache/raw', help='Cache directory (default: cache/raw)')
+@click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
 @click.option('--output', '-o', help='Output file (default: print to console)')
 @click.option('--auto-save', is_flag=True, help='Auto-save to timestamped file (e.g., backend-devs_2025-10-20_143022.txt)')
 def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_date, cache_path, output, auto_save):
@@ -1124,7 +1124,7 @@ def view(channel, merge_channels, user, include_mentions, bucket_by, days, end_d
               help='Time bucketing for multi-channel view (default: hour)')
 @click.option('--days', '-d', default=7, help='Days to look back (default: 7)')
 @click.option('--end-date', help='End date for window YYYY-MM-DD (default: today)')
-@click.option('--cache-path', default='cache/raw', help='Cache directory (default: cache/raw)')
+@click.option('--cache-path', default='cache', help='Cache directory (default: cache)')
 @click.option('--input', '-i', help='Input file with view output (skip view generation)')
 @click.option('--output', '-o', help='Output file for summary (default: print to console)')
 @click.option('--model', default='gpt-5', help='OpenAI model (default: gpt-5)')
