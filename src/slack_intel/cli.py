@@ -1212,6 +1212,22 @@ def process(channel, merge_channels, user, include_mentions, bucket_by, days, en
             date_range_str = "unknown"
             view_type = "single_channel"  # Default for input files
             normalized_channels = []
+
+            full_config = load_full_config_with_fallback()
+            org_context = {
+                "name": full_config.organization.name,
+                "description": full_config.organization.description,
+                "stakeholders": [
+                    {
+                        "name": s.name,
+                        "weight": s.weight,
+                        "role": s.role,
+                        "description": s.description
+                    }
+                    for s in full_config.organization.stakeholders
+                ],
+                "stakeholder_context": full_config.organization.stakeholder_context
+            }
         else:
             # Generate view from cache (same logic as view command)
             if not channel and not merge_channels and not user:
